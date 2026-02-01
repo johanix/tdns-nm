@@ -56,14 +56,25 @@ krs:
    # Set to true to use the new CHUNK format
    use_chunk:		false  # Set to true to use CHUNK format
 
-   # use_crypto_v2: Enable crypto abstraction layer (v2) for multi-backend support
-   # When true: Supports both HPKE and JOSE backends via unified crypto interface
-   # When false: Uses direct HPKE implementation (v1, backward compatible)
-   # Default: false (uses v1 for backward compatibility)
-   use_crypto_v2:	true
+   # use_crypto_v2: Crypto abstraction layer for multi-backend support
+   # When true (DEFAULT): Uses v2 crypto with support for both HPKE and JOSE backends
+   #   - Full JWT/JWS/JWE support for authenticated distributions
+   #   - Backend detected from manifest metadata ("crypto" field)
+   #   - Supports signature verification with KDC signing keys
+   #   - Recommended for all new deployments
+   # When false: Uses v1 direct HPKE implementation (DEPRECATED)
+   #   - Legacy compatibility mode, HPKE decryption only
+   #   - No JOSE support, no JWT unwrapping
+   #   - Set to false ONLY if receiving distributions from old KDC without v2
+   # Default: true (v2 is now the default)
+   # To use v1 (not recommended), explicitly set: use_crypto_v2: false
+   # use_crypto_v2: true
 
-   # supported_crypto: List of crypto backends this node supports (for crypto v2)
+   # supported_crypto: List of crypto backends this node supports (v2 only)
    # Options: "hpke" (X25519 + AES-256-GCM), "jose" (P-256 + ECDH-ES)
-   # The KDC will use the first supported backend that matches the node's capabilities
+   # The KDC selects a backend based on this list and its own capabilities.
+   # During enrollment, this list is sent to the KDC so it knows which backends to use.
+   # Default: ["hpke", "jose"] (supports both backends)
+   # Note: Ensure corresponding private keys are configured (long_term_hpke_priv_key or long_term_jose_priv_key)
    supported_crypto:	[ "hpke", "jose" ]
 

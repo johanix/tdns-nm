@@ -26,7 +26,7 @@ type KdcConf struct {
 	KdcEnrollmentAddress       string        `yaml:"kdc_enrollment_address" mapstructure:"kdc_enrollment_address"`             // IP:port where KDC accepts enrollment requests
 	EnrollmentExpirationWindow time.Duration `yaml:"enrollment_expiration_window" mapstructure:"enrollment_expiration_window"` // Expiration window after activation (default: 5 minutes)
 	CatalogZone                string        `yaml:"catalog_zone" mapstructure:"catalog_zone"`                                 // Catalog zone name (e.g., "catalog.example.com.")
-	UseCryptoV2                bool          `yaml:"use_crypto_v2" mapstructure:"use_crypto_v2"`                               // Feature flag: use crypto abstraction layer (v2) instead of direct HPKE (v1), default: false
+	UseCryptoV2                *bool         `yaml:"use_crypto_v2,omitempty" mapstructure:"use_crypto_v2"`                     // Crypto abstraction layer: true=v2 (HPKE+JOSE, default), false=v1 (HPKE only, deprecated)
 	KdcJosePrivKey             string        `yaml:"kdc_jose_priv_key" mapstructure:"kdc_jose_priv_key"`                       // Path to KDC JOSE private key file (P-256)
 }
 
@@ -36,7 +36,7 @@ type KrsConf struct {
 	Node            NodeConf        `yaml:"node" mapstructure:"node"`
 	ControlZone     string          `yaml:"control_zone" mapstructure:"control_zone"`         // DNS zone for distribution events
 	DnsEngine       DnsEngineConf   `yaml:"dnsengine" mapstructure:"dnsengine"`               // DNS engine config for NOTIFY
-	UseCryptoV2     bool            `yaml:"use_crypto_v2" mapstructure:"use_crypto_v2"`       // Feature flag: use crypto abstraction layer (v2) instead of direct HPKE (v1), default: false
+	UseCryptoV2     *bool           `yaml:"use_crypto_v2,omitempty" mapstructure:"use_crypto_v2"` // Crypto abstraction layer: true=v2 (HPKE+JOSE, default), false=v1 (HPKE only, deprecated)
 	SupportedCrypto []string        `yaml:"supported_crypto" mapstructure:"supported_crypto"` // List of supported crypto backends (e.g., ["hpke", "jose"])
 }
 
@@ -93,13 +93,19 @@ func (conf *KdcConf) GetEnrollmentExpirationWindow() time.Duration {
 }
 
 // ShouldUseCryptoV2 returns whether to use crypto abstraction layer (v2) or direct HPKE (v1)
-// Default is false (use v1) for backward compatibility
+// Default is true (use v2 with HPKE+JOSE support). Set to false in config for v1 (HPKE only, deprecated).
 func (conf *KdcConf) ShouldUseCryptoV2() bool {
-	return conf.UseCryptoV2
+	if conf.UseCryptoV2 == nil {
+		return true // Default to V2
+	}
+	return *conf.UseCryptoV2
 }
 
 // ShouldUseCryptoV2 returns whether to use crypto abstraction layer (v2) or direct HPKE (v1)
-// Default is false (use v1) for backward compatibility
+// Default is true (use v2 with HPKE+JOSE support). Set to false in config for v1 (HPKE only, deprecated).
 func (conf *KrsConf) ShouldUseCryptoV2() bool {
-	return conf.UseCryptoV2
+	if conf.UseCryptoV2 == nil {
+		return true // Default to V2
+	}
+	return *conf.UseCryptoV2
 }
