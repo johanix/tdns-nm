@@ -59,7 +59,7 @@ func (kdc *KdcDB) GenerateCatalogZone(catalogZoneName string, dnsEngineAddresses
 		// Create the catalog zone using tdns.CreateAutoZone
 		// Use empty addrs to get "invalid." NS record (RFC 9432 recommendation for autozones)
 		kdb := &tdns.KeyDB{} // Empty KeyDB for catalog zones
-		zd, err = kdb.CreateAutoZone(catalogZoneName, []string{})
+		zd, err = kdb.CreateAutoZone(catalogZoneName, []string{}, []string{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create catalog zone: %v", err)
 		}

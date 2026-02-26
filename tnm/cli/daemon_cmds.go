@@ -83,7 +83,7 @@ var DaemonStartCmd = &cobra.Command{
 			}
 		}
 
-		api.StartDaemon(maxwait, tdns.Globals.Slurp, daemonCommand)
+		api.StartDaemon(maxwait, tdns.Globals.Slurp, daemonCommand, nil)
 	},
 }
 
@@ -169,7 +169,7 @@ var DaemonRestartCmd = &cobra.Command{
 				fmt.Printf("%s is not newer than %s. No update.\n", srcbin, dstbin)
 			}
 		}
-		tdns.Globals.Api.StartDaemon(maxwait, false, daemonCommand) // no slurping on restart
+		tdns.Globals.Api.StartDaemon(maxwait, false, daemonCommand, nil) // no slurping on restart
 	},
 }
 

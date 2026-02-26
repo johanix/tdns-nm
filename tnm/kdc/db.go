@@ -545,7 +545,6 @@ func (kdc *KdcDB) initSchemaSQLite() error {
 		`CREATE INDEX IF NOT EXISTS idx_components_active ON components(active)`,
 		`CREATE INDEX IF NOT EXISTS idx_zones_active ON zones(active)`,
 		`CREATE INDEX IF NOT EXISTS idx_zones_service_id ON zones(service_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_zones_signing_mode ON zones(signing_mode)`,
 		`CREATE INDEX IF NOT EXISTS idx_nodes_state ON nodes(state)`,
 		`CREATE INDEX IF NOT EXISTS idx_nodes_last_seen ON nodes(last_seen)`,
 		`CREATE INDEX IF NOT EXISTS idx_dnssec_keys_zone_name ON dnssec_keys(zone_name)`,

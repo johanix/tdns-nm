@@ -64,7 +64,7 @@ func HandleKrsNotify(ctx context.Context, dnr *tdns.DnsNotifyRequest, krsDB *Krs
 
 	// Check if this is a NOTIFY for the control zone or a distribution event
 	// Format: <distributionID>.<controlzone> or just <controlzone>
-	distributionID, err := core.ExtractCorrelationIDFromQNAME(notifyZone, conf.ControlZone)
+	distributionID, err := core.ExtractDistributionIDFromQNAME(notifyZone, conf.ControlZone)
 	if err == nil {
 		// NOTIFY for distribution event: <distributionID>.<controlzone>
 		log.Printf("KRS: NOTIFY received for distribution event %s (zone: %s)", distributionID, notifyZone)
@@ -159,7 +159,7 @@ func _xxxStartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *tnm.KrsCon
 
 		// Check if this is a NOTIFY for the control zone or a distribution event
 		// Format: <distributionID>.<controlzone> or just <controlzone>
-		distributionID, err := core.ExtractCorrelationIDFromQNAME(notifyZone, conf.ControlZone)
+		distributionID, err := core.ExtractDistributionIDFromQNAME(notifyZone, conf.ControlZone)
 		if err == nil {
 			// NOTIFY for distribution event: <distributionID>.<controlzone>
 			log.Printf("KRS: NOTIFY received for distribution event %s (zone: %s)", distributionID, notifyZone)
