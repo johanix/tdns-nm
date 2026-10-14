@@ -24,7 +24,7 @@ import (
 )
 
 // TransportEncoder defines the interface for encoding/decoding distribution payloads.
-// This allows different transport mechanisms to be used (direct HPKE, JOSE, etc.)
+// This allows different transport mechanisms to be used (JOSE, etc.)
 type TransportEncoder interface {
 	// Encode encrypts and encodes a payload for transport.
 	// Returns base64-encoded ciphertext.

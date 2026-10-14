@@ -95,36 +95,11 @@ kdc:
    # configurable via YAML. Set programmatically if needed.
    # manifest_json_format: true   # JSON format (default)
 
-   # KDC HPKE private key (X25519, 32 bytes)
-   # Required for encryption of HPKE-based enrollments and key distributions.
-   # Generate with: kdc-cli keys generate --hpke --hpke-outfile <path>
-   kdc_hpke_priv_key: /etc/tdns/kdc/kdc.hpke.privatekey
-
-   # KDC HPKE signing key (P-256 ECDSA)
-   # Optional: Required only for signed HPKE distributions (JWS(JWE)).
-   # HPKE uses X25519 for encryption, but P-256 ECDSA for signing.
-   # Without this key, HPKE distributions will be unsigned (encryption only, no signature).
-   # Generate with: kdc-cli keys generate --hpke-signing --hpke-signing-outfile <path>
-   kdc_hpke_signing_key: /etc/tdns/kdc/kdc.hpke.signing.privatekey
-
    # KDC JOSE private key (P-256 ECDSA)
-   # Optional: Only required if you need JOSE-capable enrollments or clients.
+   # Required: used for enrollment and for signing and encrypting distributions.
    # JOSE uses P-256 for both encryption (ECDH-ES) and signing (ECDSA).
-   # Generate with: kdc-cli keys generate --jose --jose-outfile <path>
+   # Generate with: kdc-cli keys generate --jose-outfile <path>
    kdc_jose_priv_key: /etc/tdns/kdc/kdc.jose.privatekey
-
-   # use_crypto_v2: Crypto abstraction layer for multi-backend support
-   # When true (DEFAULT): Uses v2 crypto with support for both HPKE and JOSE backends
-   #   - Full JWT/JWS/JWE support for authenticated distributions
-   #   - Backend selection based on node capabilities (SupportedCrypto field)
-   #   - Recommended for all new deployments
-   # When false: Uses v1 direct HPKE implementation (DEPRECATED)
-   #   - Legacy compatibility mode, HPKE encryption only
-   #   - No JOSE support, no JWT wrapping
-   #   - Set to false ONLY if you need compatibility with old KRS nodes
-   # Default: true (v2 is now the default)
-   # To use v1 (not recommended), explicitly set: use_crypto_v2: false
-   # use_crypto_v2: true
 
 log:
    file:                /var/log/tdns/tdns-kdc.log

@@ -577,12 +577,11 @@ func (krs *KrsDB) AddActiveKeyWithRetirement(key *ReceivedKey) error {
 // SetNodeConfig stores the node configuration
 func (krs *KrsDB) SetNodeConfig(config *NodeConfig) error {
 	query := `INSERT OR REPLACE INTO node_config 
-		(id, long_term_hpke_pub_key, long_term_hpke_priv_key, kdc_address, control_zone, registered_at, last_seen)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`
+		(id, kdc_address, control_zone, registered_at, last_seen)
+		VALUES (?, ?, ?, ?, ?)`
 
 	_, err := krs.DB.Exec(query,
-		config.ID, config.LongTermHpkePubKey, config.LongTermHpkePrivKey,
-		config.KdcAddress, config.ControlZone, config.RegisteredAt, config.LastSeen,
+		config.ID, config.KdcAddress, config.ControlZone, config.RegisteredAt, config.LastSeen,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to set node config: %v", err)
@@ -593,43 +592,15 @@ func (krs *KrsDB) SetNodeConfig(config *NodeConfig) error {
 // GetNodeConfig retrieves the node configuration
 func (krs *KrsDB) GetNodeConfig() (*NodeConfig, error) {
 	var config NodeConfig
-	// Use nullable intermediates for BLOB columns that can be NULL
-	// Note: sql.RawBytes can only be used with Query(), not QueryRow()
-	var hpkePubKey, hpkePrivKey sql.RawBytes
-
-	rows, err := krs.DB.Query(
-		`SELECT id, long_term_hpke_pub_key, long_term_hpke_priv_key, kdc_address, control_zone, registered_at, last_seen
+	err := krs.DB.QueryRow(
+		`SELECT id, kdc_address, control_zone, registered_at, last_seen
 			FROM node_config LIMIT 1`,
-	)
+	).Scan(&config.ID, &config.KdcAddress, &config.ControlZone, &config.RegisteredAt, &config.LastSeen)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("node config not found")
+		}
 		return nil, fmt.Errorf("failed to get node config: %v", err)
-	}
-	defer rows.Close()
-
-	if !rows.Next() {
-		return nil, fmt.Errorf("node config not found")
-	}
-
-	err = rows.Scan(
-		&config.ID, &hpkePubKey, &hpkePrivKey,
-		&config.KdcAddress, &config.ControlZone, &config.RegisteredAt, &config.LastSeen,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to scan node config: %v", err)
-	}
-
-	// Convert nullable BLOB columns: nil when NULL, copy bytes when present
-	if hpkePubKey != nil {
-		config.LongTermHpkePubKey = make([]byte, len(hpkePubKey))
-		copy(config.LongTermHpkePubKey, hpkePubKey)
-	} else {
-		config.LongTermHpkePubKey = nil
-	}
-	if hpkePrivKey != nil {
-		config.LongTermHpkePrivKey = make([]byte, len(hpkePrivKey))
-		copy(config.LongTermHpkePrivKey, hpkePrivKey)
-	} else {
-		config.LongTermHpkePrivKey = nil
 	}
 
 	return &config, nil

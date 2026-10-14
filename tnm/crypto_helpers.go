@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"log"
 
-	_ "github.com/johanix/tdns-nm/tnm/crypto/hpke" // Auto-register HPKE backend
 	"github.com/johanix/tdns-transport/v2/crypto"
 	_ "github.com/johanix/tdns-transport/v2/crypto/jose" // Auto-register JOSE backend
 )
@@ -21,11 +20,11 @@ import (
 // This is a generic version that works with any supported crypto list (not just Node structs).
 //
 // Parameters:
-//   - supportedCrypto: List of supported backends (e.g., []string{"hpke"}, []string{"jose"}, []string{"hpke", "jose"})
-//   - forcedCrypto: Optional backend to force ("hpke" or "jose"); empty string auto-selects
+//   - supportedCrypto: List of supported backends (e.g., []string{"jose"})
+//   - forcedCrypto: Optional backend to force (e.g. "jose"); empty string auto-selects
 //
 // Returns:
-//   - backendName: The selected backend name ("hpke" or "jose")
+//   - backendName: The selected backend name (e.g. "jose")
 func SelectBackend(supportedCrypto []string, forcedCrypto string) string {
 	// If forced crypto is specified, use it if supported
 	if forcedCrypto != "" {
@@ -39,12 +38,11 @@ func SelectBackend(supportedCrypto []string, forcedCrypto string) string {
 	}
 
 	// Use the first supported backend
-	// Later: could have policy (prefer JOSE, fallback to HPKE, etc.)
 	if len(supportedCrypto) > 0 {
 		return supportedCrypto[0]
 	}
-	// Fallback to HPKE if no supported crypto is specified
-	return "hpke"
+	// JOSE is the default when no supported crypto is specified
+	return "jose"
 }
 
 // ExtractEphemeralKey extracts the ephemeral public key from ciphertext using the backend's GetEphemeralKey method.
@@ -69,14 +67,14 @@ func ExtractEphemeralKey(backend crypto.Backend, ciphertext []byte) ([]byte, err
 //
 // Parameters:
 //   - plaintext: The unencrypted payload to encrypt (operation-agnostic)
-//   - publicKeyData: Raw public key bytes (HPKE: 32-byte X25519 key, JOSE: JWK JSON bytes)
-//   - backendName: The crypto backend to use ("hpke" or "jose")
+//   - publicKeyData: Raw public key bytes (JOSE: JWK JSON bytes)
+//   - backendName: The crypto backend to use (e.g. "jose")
 //   - supportedCrypto: Optional list of supported backends (for validation); can be nil
 //   - context: Optional context string for logging (e.g., "node ID" or "KDC")
 //
 // Returns:
 //   - ciphertext: The encrypted payload
-//   - ephemeralPub: Ephemeral public key (32 bytes for HPKE, empty for JOSE)
+//   - ephemeralPub: Ephemeral public key (empty for JOSE, where it is in the JWE header)
 //   - error: Any error during encryption
 func EncryptPayload(plaintext []byte, publicKeyData []byte, backendName string, supportedCrypto []string, context string) (ciphertext []byte, ephemeralPub []byte, err error) {
 	if len(plaintext) == 0 {

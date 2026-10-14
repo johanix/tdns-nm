@@ -567,5 +567,5 @@ func init() {
 
 	kdcDistribPurgeCmd.Flags().Bool("force", false, "Delete ALL distributions (not just completed ones)")
 
-	kdcDistribMultiCmd.Flags().String("crypto", "", "Force crypto backend (hpke or jose). If not specified, uses any backend the node supports.")
+	kdcDistribMultiCmd.Flags().String("crypto", "", "Force crypto backend (jose). If not specified, uses any backend the node supports.")
 }

@@ -34,13 +34,10 @@ krs:
       # Example: "cpt.axfr.net." or "node1.example.com."
       id:				cpt.axfr.net.  # Must match node ID in KDC (FQDN with trailing dot)
 
-      # Long-term private keys for decryption (at least one required)
-      long_term_hpke_priv_key:	/etc/tdns/krs/cpt.axfr.net.hpke.privatekey  # HPKE (X25519) private key
+      # Long-term private key for decryption (required)
       long_term_jose_priv_key:	/etc/tdns/krs/cpt.axfr.net.jose.privatekey  # JOSE (P-256) private key
 
-      # KDC public keys for signature verification (optional, enables JWS signature verification)
-      kdc_hpke_pubkey:		~/.config/tdns/kdc.hpke.pubkey          # KDC HPKE encryption public key (hex)
-      kdc_hpke_signing_pubkey:	~/.config/tdns/kdc.hpke.signing.pubkey  # KDC HPKE signing public key (JWK)
+      # KDC public key for signature verification (optional, enables JWS signature verification)
       kdc_jose_pubkey:		~/.config/tdns/kdc.jose.pubkey          # KDC JOSE public key (JWK)
 
       kdc_address:		127.0.0.1:5354  # KDC server address (IP:port)
@@ -56,25 +53,8 @@ krs:
    # Set to true to use the new CHUNK format
    use_chunk:		false  # Set to true to use CHUNK format
 
-   # use_crypto_v2: Crypto abstraction layer for multi-backend support
-   # When true (DEFAULT): Uses v2 crypto with support for both HPKE and JOSE backends
-   #   - Full JWT/JWS/JWE support for authenticated distributions
-   #   - Backend detected from manifest metadata ("crypto" field)
-   #   - Supports signature verification with KDC signing keys
-   #   - Recommended for all new deployments
-   # When false: Uses v1 direct HPKE implementation (DEPRECATED)
-   #   - Legacy compatibility mode, HPKE decryption only
-   #   - No JOSE support, no JWT unwrapping
-   #   - Set to false ONLY if receiving distributions from old KDC without v2
-   # Default: true (v2 is now the default)
-   # To use v1 (not recommended), explicitly set: use_crypto_v2: false
-   # use_crypto_v2: true
-
-   # supported_crypto: List of crypto backends this node supports (v2 only)
-   # Options: "hpke" (X25519 + AES-256-GCM), "jose" (P-256 + ECDH-ES)
-   # The KDC selects a backend based on this list and its own capabilities.
-   # During enrollment, this list is sent to the KDC so it knows which backends to use.
-   # Default: ["hpke", "jose"] (supports both backends)
-   # Note: Ensure corresponding private keys are configured (long_term_hpke_priv_key or long_term_jose_priv_key)
-   supported_crypto:	[ "hpke", "jose" ]
+   # supported_crypto: List of crypto backends this node supports
+   # The only backend is "jose" (P-256 + ECDH-ES); it is also the default.
+   # During enrollment, this list is sent to the KDC so it knows which backend to use.
+   supported_crypto:	[ "jose" ]
 

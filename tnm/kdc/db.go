@@ -1322,9 +1322,9 @@ func (kdc *KdcDB) GetNode(nodeID string) (*Node, error) {
 	var supportedCryptoJSON sql.NullString
 	var josePubKey []byte
 	err := kdc.DB.QueryRow(
-		"SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
+		"SELECT id, name, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
 		nodeIDFQDN,
-	).Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+	).Scan(&n.ID, &n.Name, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// Try without trailing dot (for legacy data)
@@ -1332,9 +1332,9 @@ func (kdc *KdcDB) GetNode(nodeID string) (*Node, error) {
 				nodeIDNoDot := strings.TrimSuffix(nodeIDFQDN, ".")
 				var josePubKey2 []byte
 				err2 := kdc.DB.QueryRow(
-					"SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
+					"SELECT id, name, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE id = ?",
 					nodeIDNoDot,
-				).Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey2, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
+				).Scan(&n.ID, &n.Name, &josePubKey2, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
 				if err2 == nil {
 					josePubKey = josePubKey2
 				}
@@ -1369,7 +1369,7 @@ func (kdc *KdcDB) GetNode(nodeID string) (*Node, error) {
 
 // GetAllNodes retrieves all nodes
 func (kdc *KdcDB) GetAllNodes() ([]*Node, error) {
-	rows, err := kdc.DB.Query("SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes ORDER BY name")
+	rows, err := kdc.DB.Query("SELECT id, name, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes ORDER BY name")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query nodes: %v", err)
 	}
@@ -1381,7 +1381,7 @@ func (kdc *KdcDB) GetAllNodes() ([]*Node, error) {
 		var notifyAddr sql.NullString
 		var supportedCryptoJSON sql.NullString
 		var josePubKey []byte
-		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
 			return nil, fmt.Errorf("failed to scan node: %v", err)
 		}
 		if notifyAddr.Valid {
@@ -1413,7 +1413,7 @@ func (kdc *KdcDB) GetAllNodes() ([]*Node, error) {
 // GetActiveNodes retrieves all active (online) nodes
 func (kdc *KdcDB) GetActiveNodes() ([]*Node, error) {
 	rows, err := kdc.DB.Query(
-		"SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE state = 'online' ORDER BY name",
+		"SELECT id, name, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE state = 'online' ORDER BY name",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query active nodes: %v", err)
@@ -1426,7 +1426,7 @@ func (kdc *KdcDB) GetActiveNodes() ([]*Node, error) {
 		var notifyAddr sql.NullString
 		var supportedCryptoJSON sql.NullString
 		var josePubKey []byte
-		if err := rows.Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
+		if err := rows.Scan(&n.ID, &n.Name, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment); err != nil {
 			return nil, fmt.Errorf("failed to scan node: %v", err)
 		}
 		if notifyAddr.Valid {
@@ -1446,54 +1446,8 @@ func (kdc *KdcDB) GetActiveNodes() ([]*Node, error) {
 	return nodes, rows.Err()
 }
 
-// GetNodeByPublicKey retrieves a node by its long-term public key
-func (kdc *KdcDB) GetNodeByPublicKey(pubKey []byte) (*Node, error) {
-	var n Node
-	var notifyAddr sql.NullString
-	var supportedCryptoJSON sql.NullString
-	var josePubKey []byte
-	// Only query by LongTermPubKey if it's not nil (JOSE-only nodes have NULL)
-	if len(pubKey) == 0 {
-		return nil, nil // Cannot query by nil/empty key
-	}
-	err := kdc.DB.QueryRow(
-		"SELECT id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, notify_address, registered_at, last_seen, state, comment FROM nodes WHERE long_term_hpke_pub_key = ?",
-		pubKey,
-	).Scan(&n.ID, &n.Name, &n.LongTermHpkePubKey, &josePubKey, &supportedCryptoJSON, &notifyAddr, &n.RegisteredAt, &n.LastSeen, &n.State, &n.Comment)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil // No node found with this public key
-		}
-		return nil, fmt.Errorf("failed to get node by public key: %v", err)
-	}
-	if notifyAddr.Valid {
-		n.NotifyAddress = notifyAddr.String
-	}
-	if len(josePubKey) > 0 {
-		n.LongTermJosePubKey = josePubKey
-	}
-	// Deserialize supported_crypto JSON array
-	if supportedCryptoJSON.Valid && supportedCryptoJSON.String != "" {
-		if err := json.Unmarshal([]byte(supportedCryptoJSON.String), &n.SupportedCrypto); err != nil {
-			log.Printf("Warning: Failed to parse supported_crypto for node %s: %v", n.ID, err)
-		}
-	}
-	return &n, nil
-}
-
 // AddNode adds a new node
 func (kdc *KdcDB) AddNode(node *Node) error {
-	// Check if a node with this public key already exists (only if HPKE key is present)
-	if len(node.LongTermHpkePubKey) > 0 {
-		existingNode, err := kdc.GetNodeByPublicKey(node.LongTermHpkePubKey)
-		if err != nil {
-			return fmt.Errorf("failed to check for existing node: %v", err)
-		}
-		if existingNode != nil {
-			return fmt.Errorf("a node with this public key already exists: %s (id: %s)", existingNode.Name, existingNode.ID)
-		}
-	}
-
 	// Serialize supported_crypto to JSON
 	var supportedCryptoJSON []byte
 	var err error
@@ -1505,8 +1459,8 @@ func (kdc *KdcDB) AddNode(node *Node) error {
 	}
 
 	_, err = kdc.DB.Exec(
-		"INSERT INTO nodes (id, name, long_term_hpke_pub_key, long_term_jose_pub_key, supported_crypto, sig0_pubkey, notify_address, state, comment) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		node.ID, node.Name, node.LongTermHpkePubKey, node.LongTermJosePubKey, supportedCryptoJSON, node.Sig0PubKey, node.NotifyAddress, node.State, node.Comment,
+		"INSERT INTO nodes (id, name, long_term_jose_pub_key, supported_crypto, sig0_pubkey, notify_address, state, comment) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		node.ID, node.Name, node.LongTermJosePubKey, supportedCryptoJSON, node.Sig0PubKey, node.NotifyAddress, node.State, node.Comment,
 	)
 	if err != nil {
 		// Check for unique constraint violation (in case the constraint wasn't in the schema)
@@ -1531,8 +1485,8 @@ func (kdc *KdcDB) UpdateNode(node *Node) error {
 	}
 
 	_, err = kdc.DB.Exec(
-		"UPDATE nodes SET name = ?, long_term_hpke_pub_key = ?, long_term_jose_pub_key = ?, supported_crypto = ?, notify_address = ?, state = ?, comment = ? WHERE id = ?",
-		node.Name, node.LongTermHpkePubKey, node.LongTermJosePubKey, supportedCryptoJSON, node.NotifyAddress, node.State, node.Comment, node.ID,
+		"UPDATE nodes SET name = ?, long_term_jose_pub_key = ?, supported_crypto = ?, notify_address = ?, state = ?, comment = ? WHERE id = ?",
+		node.Name, node.LongTermJosePubKey, supportedCryptoJSON, node.NotifyAddress, node.State, node.Comment, node.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to update node: %v", err)
@@ -2433,7 +2387,7 @@ func (kdc *KdcDB) CreateDistributionIDForKeys(zoneName string, keyIDs []string) 
 // CreatePingOperation creates a ping operation for a specific node
 // Returns the distribution ID
 // The ping operation is not encrypted - it includes a nonce in the payload metadata
-// forcedCrypto: if provided ("hpke" or "jose"), forces that backend (if node supports it)
+// forcedCrypto: if provided (e.g. "jose"), forces that backend (if node supports it)
 func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf, forcedCrypto string) (string, error) {
 	if nodeID == "" {
 		return "", fmt.Errorf("nodeID is required")
@@ -2496,7 +2450,7 @@ func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf, force
 		KeyID:           "", // NULL for ping operation
 		NodeID:          nodeID,
 		EncryptedKey:    ciphertext,   // Encrypted nonce
-		EphemeralPubKey: ephemeralPub, // Ephemeral key for HPKE
+		EphemeralPubKey: ephemeralPub, // Empty for JOSE (the ephemeral key is in the JWE header)
 		CreatedAt:       time.Now(),
 		ExpiresAt:       expiresAt,
 		Status:          DistributionStatusPending,
@@ -2619,7 +2573,7 @@ func (kdc *KdcDB) CreateRollKeyOperation(newKey *DNSSECKey, oldKeyID string, nod
 		return "", fmt.Errorf("failed to get distribution ID: %v", err)
 	}
 
-	// Encrypt the new key using HPKE
+	// Encrypt the new key for the node
 	encryptedKey, ephemeralPubKey, _, err := kdc.EncryptKeyForNode(newKey, node, kdcConf, distributionID)
 	if err != nil {
 		return "", fmt.Errorf("failed to encrypt key: %v", err)

@@ -82,53 +82,48 @@ func main() {
 // startKdc initializes and starts all KDC subsystems
 // This replaces the tdns.StartKdc() function but uses tdns-nm packages
 func startKdc(ctx context.Context, conf *tdns.Config, kdcConf *tnm.KdcConf, apirouter *mux.Router) error {
-	// Validate HPKE key configuration BEFORE initializing database
-	// This is critical - KDC cannot function without a valid HPKE keypair
-	if kdcConf.KdcHpkePrivKey == "" {
-		return fmt.Errorf(`FATAL: kdc_hpke_priv_key is not configured in KDC config file.
+	// Validate JOSE key configuration BEFORE initializing database
+	// This is critical - KDC cannot function without a valid JOSE keypair
+	if kdcConf.KdcJosePrivKey == "" {
+		return fmt.Errorf(`FATAL: kdc_jose_priv_key is not configured in KDC config file.
 
-The KDC requires a long-term HPKE (Hybrid Public Key Encryption) keypair to:
+The KDC requires a long-term JOSE (P-256) keypair to:
   - Encrypt enrollment confirmations sent to KRS nodes
   - Decrypt enrollment requests from KRS nodes
+  - Sign and encrypt key distributions
 
 To fix this:
-  1. Generate an HPKE keypair using: kdc-cli hpke generate --outfile /path/to/kdc.hpke.privatekey
+  1. Generate a JOSE keypair using: kdc-cli keys generate --jose-outfile /path/to/kdc.jose.privatekey
   2. Add the following to your KDC config file (under 'kdc:' section):
-     kdc_hpke_priv_key: /path/to/kdc.hpke.privatekey
+     kdc_jose_priv_key: /path/to/kdc.jose.privatekey
   3. Restart the KDC
 
-The key file will be created with appropriate permissions (0600) and will contain
-both the private key and public key information.`)
+The key file will be created with appropriate permissions (0600).`)
 	}
 
-	// Try to load the HPKE keypair to validate it exists and is readable
-	hpkeKeys, err := kdc.GetKdcHpkeKeypair(kdcConf.KdcHpkePrivKey)
+	// Try to load the JOSE keypair to validate it exists and is readable
+	joseKeys, err := kdc.GetKdcJoseKeypair(kdcConf.KdcJosePrivKey)
 	if err != nil {
-		return fmt.Errorf(`FATAL: Failed to load HPKE keypair from %s: %v
+		return fmt.Errorf(`FATAL: Failed to load JOSE keypair from %s: %v
 
-The KDC cannot start without a valid HPKE keypair. This keypair is required to:
+The KDC cannot start without a valid JOSE keypair. This keypair is required to:
   - Encrypt enrollment confirmations sent to KRS nodes
   - Decrypt enrollment requests from KRS nodes
+  - Sign and encrypt key distributions
 
 To fix this:
-  1. If the key file does not exist, generate a new HPKE keypair:
-     kdc-cli hpke generate --outfile %s
+  1. If the key file does not exist, generate a new JOSE keypair:
+     kdc-cli keys generate --jose-outfile %s
   2. If the key file exists but cannot be read, check file permissions (should be 0600)
-  3. Ensure the path in kdc_hpke_priv_key in your KDC config is correct
+  3. Ensure the path in kdc_jose_priv_key in your KDC config is correct
   4. Restart the KDC
 
 Note: If you generate a NEW keypair, you must regenerate all enrollment blobs that were
-created with the old public key, as they will no longer be decryptable.`, kdcConf.KdcHpkePrivKey, err, kdcConf.KdcHpkePrivKey)
+created with the old public key, as they will no longer be decryptable.`, kdcConf.KdcJosePrivKey, err, kdcConf.KdcJosePrivKey)
 	}
 
-	// Log successful key loading (public key for verification)
-	pubKeyHex := fmt.Sprintf("%x", hpkeKeys.PublicKey)
-	log.Printf("KDC: Loaded HPKE keypair from %s (public key: %s...)", kdcConf.KdcHpkePrivKey, pubKeyHex[:16])
-
-	// Warn if JOSE key is missing when crypto-v2 is enabled
-	if kdcConf.ShouldUseCryptoV2() && kdcConf.KdcJosePrivKey == "" {
-		log.Printf("KDC: Warning: kdc_jose_priv_key not configured; JOSE enrollment/key distribution will fail")
-	}
+	// Log successful key loading (key ID for verification)
+	log.Printf("KDC: Loaded JOSE keypair from %s (key id: %s)", kdcConf.KdcJosePrivKey, kdc.GenerateKeyID("jose", joseKeys.PublicKeyBytes))
 
 	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN, kdcConf)
 	if err != nil {

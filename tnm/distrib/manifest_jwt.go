@@ -11,7 +11,7 @@
  *   - distribution_id: Unique distribution identifier
  *   - receiver_id: Intended recipient
  *   - content: Content type (e.g., "mgmt_operations")
- *   - crypto: Crypto backend used (e.g., "jose", "hpke")
+ *   - crypto: Crypto backend used (e.g., "jose")
  *   - chunk_count: Number of data chunks (0 = inline payload)
  *   - chunk_size: Size of each chunk
  *   - chunk_hash: SHA-256 hash of all chunk data

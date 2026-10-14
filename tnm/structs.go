@@ -7,7 +7,7 @@
 package tnm
 
 // DistributionEntry represents a single operation entry in a distribution
-// This is the JSON structure used for HPKE-encrypted payloads between KDC and KRS
+// This is the JSON structure used for encrypted payloads between KDC and KRS
 type DistributionEntry struct {
 	Operation string `json:"operation"` // "ping", "roll_key", "delete_key", "node_components"
 

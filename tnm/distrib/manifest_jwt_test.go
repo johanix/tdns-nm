@@ -159,7 +159,7 @@ func TestConvertJWTClaimsToManifestData(t *testing.T) {
 		DistributionID:  "dist-abc",
 		ReceiverID:      "node4.example.com.",
 		Content:         "mgmt_operations",
-		Crypto:          "hpke",
+		Crypto:          "jose",
 		ChunkCount:      1,
 		ChunkSize:       50000,
 		ChunkHash:       "sha256:xyz789",
@@ -193,8 +193,8 @@ func TestConvertJWTClaimsToManifestData(t *testing.T) {
 	if md.Metadata["content"] != "mgmt_operations" {
 		t.Errorf("Metadata[content] = %v, want mgmt_operations", md.Metadata["content"])
 	}
-	if md.Metadata["crypto"] != "hpke" {
-		t.Errorf("Metadata[crypto] = %v, want hpke", md.Metadata["crypto"])
+	if md.Metadata["crypto"] != "jose" {
+		t.Errorf("Metadata[crypto] = %v, want jose", md.Metadata["crypto"])
 	}
 	if md.Metadata["timestamp"] != int64(1234567890) {
 		t.Errorf("Metadata[timestamp] = %v, want 1234567890", md.Metadata["timestamp"])

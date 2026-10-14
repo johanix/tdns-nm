@@ -33,8 +33,8 @@ import (
 // selectBackendForNode determines which crypto backend to use for a node
 // based on the node's SupportedCrypto field.
 // This is a convenience wrapper around tnm.SelectBackend that works with Node structs.
-// forcedCrypto: if provided ("hpke" or "jose"), forces that backend (if node supports it)
-// Returns the backend name (e.g., "hpke", "jose")
+// forcedCrypto: if provided (e.g. "jose"), forces that backend (if node supports it)
+// Returns the backend name (e.g., "jose")
 func selectBackendForNode(node *Node, forcedCrypto string) string {
 	backendName := tnm.SelectBackend(node.SupportedCrypto, forcedCrypto)
 	if forcedCrypto != "" && backendName != forcedCrypto {
@@ -386,7 +386,7 @@ func splitIntoChunks(
 }
 
 // prepareChunksForNodeV2 prepares chunks for a node's distribution event
-// using the crypto abstraction layer to support both HPKE and JOSE.
+// using the crypto abstraction layer (JOSE).
 // This is called on-demand when CHUNK is queried.
 // The crypto backend is selected based on the node's SupportedCrypto field.
 //
@@ -471,21 +471,8 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	log.Printf("KDC: Using %s backend for node %s", backendName, nodeID)
 
 	// Parse node's public key using the selected backend
-	// For JOSE, we use LongTermJosePubKey; for HPKE, we use LongTermPubKey
 	var nodePubKey crypto.PublicKey
-	if backendName == "hpke" {
-		// Defensive check: refuse HPKE operations for JOSE-only nodes
-		if len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
-			return nil, fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", nodeID)
-		}
-		if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
-			return nil, fmt.Errorf("node %s has invalid HPKE public key length: %d (expected 32)", nodeID, len(node.LongTermHpkePubKey))
-		}
-		nodePubKey, err = backend.ParsePublicKey(node.LongTermHpkePubKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse node HPKE public key: %v", err)
-		}
-	} else if backendName == "jose" {
+	if backendName == "jose" {
 		if len(node.LongTermJosePubKey) == 0 {
 			return nil, fmt.Errorf("node %s does not have a JOSE public key stored (required for JOSE backend)", nodeID)
 		}
@@ -528,16 +515,6 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 		} else {
 			kdcSigningKey = joseKeys.PrivateKey
 			log.Printf("KDC: Loaded KDC JOSE signing key for authenticated distributions")
-		}
-	} else if backendName == "hpke" {
-		// For HPKE, we need a separate P-256 ECDSA signing key (X25519 can't sign)
-		hpkeSigningKeys, err := GetKdcHpkeSigningKeypair(conf.KdcHpkeSigningKey)
-		if err != nil {
-			log.Printf("KDC: Warning: Failed to load KDC HPKE signing key: %v (using unsigned distributions)", err)
-			kdcSigningKey = nil
-		} else {
-			kdcSigningKey = hpkeSigningKeys.PrivateKey
-			log.Printf("KDC: Loaded KDC HPKE signing key for authenticated distributions")
 		}
 	}
 
@@ -671,44 +648,9 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 		}
 
 		// Calculate HMAC using the recipient node's long-term public key
-		// Select the appropriate key based on the crypto backend used for encryption
-		var hmacKey []byte
-		if backendName == "hpke" {
-			// For HPKE, use the X25519 public key directly (32 bytes)
-			if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
-				return nil, fmt.Errorf("node %s has invalid HPKE public key for HMAC: length %d (expected 32)", nodeID, len(node.LongTermHpkePubKey))
-			}
-			hmacKey = node.LongTermHpkePubKey
-		} else if backendName == "jose" {
-			// For JOSE, extract the x-coordinate from the ECDSA P-256 public key (32 bytes)
-			if len(node.LongTermJosePubKey) == 0 {
-				return nil, fmt.Errorf("node %s does not have a JOSE public key stored (required for HMAC)", nodeID)
-			}
-			// Parse JWK to extract ECDSA public key
-			var jwk jose.JSONWebKey
-			if err := json.Unmarshal(node.LongTermJosePubKey, &jwk); err != nil {
-				return nil, fmt.Errorf("failed to parse node JOSE public key for HMAC: %v", err)
-			}
-			ecdsaKey, ok := jwk.Key.(*ecdsa.PublicKey)
-			if !ok {
-				return nil, fmt.Errorf("node %s JOSE public key is not an ECDSA key (required for HMAC)", nodeID)
-			}
-			// Validate curve is P-256 (required for this backend)
-			if ecdsaKey.Curve != elliptic.P256() {
-				return nil, fmt.Errorf("node %s JOSE public key uses unsupported curve: %s (expected P-256)", nodeID, ecdsaKey.Curve.Params().Name)
-			}
-			// Extract x-coordinate (32 bytes for P-256)
-			xBytes := ecdsaKey.X.Bytes()
-			// Calculate expected coordinate length for P-256: (256 bits + 7) / 8 = 32 bytes
-			expectedLen := (ecdsaKey.Curve.Params().BitSize + 7) / 8
-			if len(xBytes) > expectedLen {
-				return nil, fmt.Errorf("node %s JOSE public key x-coordinate too large: %d bytes (max: %d for P-256)", nodeID, len(xBytes), expectedLen)
-			}
-			// Pad to expectedLen bytes if needed (ECDSA coordinates are variable length)
-			hmacKey = make([]byte, expectedLen)
-			copy(hmacKey[expectedLen-len(xBytes):], xBytes)
-		} else {
-			return nil, fmt.Errorf("unsupported crypto backend for HMAC: %s", backendName)
+		hmacKey, err := nodeJoseHMACKey(node)
+		if err != nil {
+			return nil, err
 		}
 		if err := distrib.CalculateCHUNKHMAC(manifestCHUNK, hmacKey); err != nil {
 			return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
@@ -760,4 +702,36 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	log.Printf("KDC: Prepared %d CHUNK records for node %s, distribution %s using %s backend",
 		len(allChunks), nodeID, distributionID, backendName)
 	return prepared, nil
+}
+
+// nodeJoseHMACKey returns the HMAC key for a JSON manifest sent to a node: the
+// x-coordinate of the node's long-term P-256 JOSE public key, padded to 32 bytes.
+func nodeJoseHMACKey(node *Node) ([]byte, error) {
+	if len(node.LongTermJosePubKey) == 0 {
+		return nil, fmt.Errorf("node %s does not have a JOSE public key stored (required for HMAC)", node.ID)
+	}
+	// Parse JWK to extract ECDSA public key
+	var jwk jose.JSONWebKey
+	if err := json.Unmarshal(node.LongTermJosePubKey, &jwk); err != nil {
+		return nil, fmt.Errorf("failed to parse node JOSE public key for HMAC: %v", err)
+	}
+	ecdsaKey, ok := jwk.Key.(*ecdsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("node %s JOSE public key is not an ECDSA key (required for HMAC)", node.ID)
+	}
+	// Validate curve is P-256 (required for this backend)
+	if ecdsaKey.Curve != elliptic.P256() {
+		return nil, fmt.Errorf("node %s JOSE public key uses unsupported curve: %s (expected P-256)", node.ID, ecdsaKey.Curve.Params().Name)
+	}
+	// Extract x-coordinate (32 bytes for P-256)
+	xBytes := ecdsaKey.X.Bytes()
+	// Calculate expected coordinate length for P-256: (256 bits + 7) / 8 = 32 bytes
+	expectedLen := (ecdsaKey.Curve.Params().BitSize + 7) / 8
+	if len(xBytes) > expectedLen {
+		return nil, fmt.Errorf("node %s JOSE public key x-coordinate too large: %d bytes (max: %d for P-256)", node.ID, len(xBytes), expectedLen)
+	}
+	// Pad to expectedLen bytes if needed (ECDSA coordinates are variable length)
+	hmacKey := make([]byte, expectedLen)
+	copy(hmacKey[expectedLen-len(xBytes):], xBytes)
+	return hmacKey, nil
 }

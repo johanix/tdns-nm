@@ -7,6 +7,7 @@
 package kdc
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -178,4 +179,13 @@ func GetKdcJosePubKey(privKeyPath string) ([]byte, error) {
 		return nil, err
 	}
 	return keys.PublicKeyBytes, nil
+}
+
+// GenerateKeyID generates a keyid from public key bytes using SHA-256
+// Format: {algorithm}_{hash8} where hash8 is first 8 hex characters of SHA256 hash
+// Example: "jose_e5f6a7b8"
+func GenerateKeyID(algorithm string, publicKeyBytes []byte) string {
+	hash := sha256.Sum256(publicKeyBytes)
+	// Use first 4 bytes (8 hex chars) for a shorter, still collision-resistant keyid
+	return fmt.Sprintf("%s_%x", algorithm, hash[:4])
 }
