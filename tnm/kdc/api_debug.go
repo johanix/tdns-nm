@@ -15,8 +15,8 @@ import (
 	"time"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
+	"github.com/johanix/tdns-transport/v2/distrib"
 	tdns "github.com/johanix/tdns/v2"
-	"github.com/johanix/tdns/v2/distrib"
 	"github.com/miekg/dns"
 )
 

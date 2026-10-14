@@ -21,10 +21,11 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	nmdistrib "github.com/johanix/tdns-nm/tnm/distrib"
+	"github.com/johanix/tdns-transport/v2/crypto"
+	"github.com/johanix/tdns-transport/v2/distrib"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/crypto"
-	"github.com/johanix/tdns/v2/distrib"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
 )
@@ -249,7 +250,7 @@ func (kdc *KdcDB) buildKeyOperationsPayload(
 		// Use signed encryption: JWS(JWE(payload))
 		// This provides both confidentiality (JWE) and authenticity (JWS)
 		log.Printf("KDC: Using signed encryption (JWS(JWE)) with %s backend", backendName)
-		base64Data, err = distrib.EncryptSignAndEncode(backend, nodePubKey, entriesJSON, signingKey, encryptMetadata)
+		base64Data, err = nmdistrib.EncryptSignAndEncode(backend, nodePubKey, entriesJSON, signingKey, encryptMetadata)
 		if err != nil {
 			return nil, 0, 0, 0, fmt.Errorf("failed to encrypt and sign distribution payload with %s backend: %v", backendName, err)
 		}
@@ -320,7 +321,7 @@ func buildManifestMetadata(
 func splitIntoChunks(
 	base64Data []byte,
 	metadata map[string]interface{},
-	jwtClaims *distrib.JWTManifestClaims,
+	jwtClaims *nmdistrib.JWTManifestClaims,
 	conf *tnm.KdcConf,
 ) (uint16, uint16, []*core.CHUNK, error) {
 	// Get max chunk size from config (this is the inline threshold for TCP transport)
@@ -339,7 +340,7 @@ func splitIntoChunks(
 		// JWT format - use JWT estimator
 		testClaims := *jwtClaims
 		testClaims.Payload = base64.StdEncoding.EncodeToString(base64Data)
-		estimatedSize = distrib.EstimateJWTManifestSize(&testClaims)
+		estimatedSize = nmdistrib.EstimateJWTManifestSize(&testClaims)
 		formatName = "JWT"
 	} else {
 		// JSON format - use JSON estimator
@@ -596,20 +597,20 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 
 	// Determine if JWT format will be used (signing key available)
 	// and create a template for size estimation if so
-	var jwtClaimsTemplate *distrib.JWTManifestClaims
+	var jwtClaimsTemplate *nmdistrib.JWTManifestClaims
 	if kdcSigningKey != nil {
-		jwtClaimsTemplate = &distrib.JWTManifestClaims{
-			Issuer:          "kdc",
-			Subject:         "distribution",
-			IssuedAt:        time.Now().Unix(),
-			DistributionID:  distributionID,
-			ReceiverID:      nodeID,
-			Content:         contentType,
-			Crypto:          backendName,
-			ChunkHash:       checksum,
-			ZoneCount:       zoneCount,
-			KeyCount:        keyCount,
-			OperationCount:  operationCount,
+		jwtClaimsTemplate = &nmdistrib.JWTManifestClaims{
+			Issuer:         "kdc",
+			Subject:        "distribution",
+			IssuedAt:       time.Now().Unix(),
+			DistributionID: distributionID,
+			ReceiverID:     nodeID,
+			Content:        contentType,
+			Crypto:         backendName,
+			ChunkHash:      checksum,
+			ZoneCount:      zoneCount,
+			KeyCount:       keyCount,
+			OperationCount: operationCount,
 		}
 		// Add TTL fields for estimation
 		if conf != nil && conf.RetireTime > 0 {
@@ -644,7 +645,7 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 			claims.Payload = base64.StdEncoding.EncodeToString(base64Data)
 		}
 
-		manifestCHUNK, err = distrib.CreateJWTManifest(claims, kdcSigningKey, backend)
+		manifestCHUNK, err = nmdistrib.CreateJWTManifest(claims, kdcSigningKey, backend)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create JWT manifest: %v", err)
 		}

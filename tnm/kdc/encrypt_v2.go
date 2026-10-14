@@ -15,8 +15,7 @@ import (
 	"time"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
-	"github.com/johanix/tdns/v2/crypto"
-	"github.com/johanix/tdns/v2/hpke"
+	"github.com/johanix/tdns-transport/v2/crypto"
 )
 
 // EncryptKeyForNodeV2 encrypts a DNSSEC key's private key material for a specific node
@@ -117,7 +116,7 @@ func (kdc *KdcDB) EncryptKeyForNodeV2(
 		EphemeralPubKey: ephemeralPub,
 		CreatedAt:       time.Now(),
 		ExpiresAt:       expiresAt,
-		Status:          hpke.DistributionStatusPending,
+		Status:          DistributionStatusPending,
 		DistributionID:  distID,
 		Operation:       "roll_key",
 		Payload:         make(map[string]interface{}),

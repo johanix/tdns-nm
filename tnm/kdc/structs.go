@@ -8,8 +8,6 @@ package kdc
 
 import (
 	"time"
-
-	"github.com/johanix/tdns/v2/hpke"
 )
 
 // ZoneSigningMode represents how a zone is signed
@@ -182,6 +180,18 @@ type DNSSECKey struct {
 	Comment     string     `json:"comment"`                // Optional comment
 }
 
+// DistributionStatus is the lifecycle status of a distribution record.
+// Moved here from tdns-transport v2/hpke/types.go, which dropped it in
+// f32e048 (cleanup step 7); only the KDC uses it.
+type DistributionStatus string
+
+const (
+	DistributionStatusPending   DistributionStatus = "pending"
+	DistributionStatusDelivered DistributionStatus = "delivered"
+	DistributionStatusActive    DistributionStatus = "active"
+	DistributionStatusRevoked   DistributionStatus = "revoked"
+)
+
 // DistributionRecord represents a record of a key distribution to a node
 type DistributionRecord struct {
 	ID              string // Unique ID for this distribution
@@ -194,7 +204,7 @@ type DistributionRecord struct {
 	// For JOSE: Empty (ephemeral key is embedded in JWE header within ciphertext).
 	CreatedAt      time.Time
 	ExpiresAt      *time.Time // Optional expiration of the distributed key
-	Status         hpke.DistributionStatus
+	Status         DistributionStatus
 	DistributionID string                 // HPKE distribution ID (for tracking)
 	CompletedAt    *time.Time             // When distribution was completed (nil if not completed)
 	Operation      string                 // Operation type: ping, roll_key, delete_key, node_components

@@ -21,10 +21,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/distrib"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/distrib"
-	"github.com/johanix/tdns/v2/hpke"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
 )
@@ -508,7 +507,7 @@ func (kdc *KdcDB) GetDistributionRecordsForDistributionID(distributionID string)
 				record.Payload = payload
 			}
 		}
-		record.Status = hpke.DistributionStatus(statusStr)
+		record.Status = DistributionStatus(statusStr)
 		records = append(records, record)
 	}
 	return records, rows.Err()
@@ -793,11 +792,11 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 			ZoneName:        "_test_distribution_", // Placeholder zone for test distributions
 			KeyID:           "_test_key_",          // Placeholder key for test distributions
 			NodeID:          nodeID,
-			EncryptedKey:    []byte{},       // Empty for test distributions
-			EphemeralPubKey: []byte{},       // Empty for test distributions
+			EncryptedKey:    []byte{}, // Empty for test distributions
+			EphemeralPubKey: []byte{}, // Empty for test distributions
 			CreatedAt:       time.Now(),
 			ExpiresAt:       nil,
-			Status:          hpke.DistributionStatusPending,
+			Status:          DistributionStatusPending,
 			DistributionID:  distributionID,
 		}
 

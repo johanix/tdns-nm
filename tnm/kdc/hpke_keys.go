@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/tdns/v2/hpke"
+	"github.com/johanix/tdns-transport/v2/hpke"
 )
 
 // KdcHpkeKeys manages the KDC's HPKE keypair

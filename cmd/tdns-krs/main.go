@@ -18,9 +18,8 @@ import (
 	"github.com/gorilla/mux"
 	tnm "github.com/johanix/tdns-nm/tnm"
 	"github.com/johanix/tdns-nm/tnm/krs"
+	"github.com/johanix/tdns-transport/v2/hpke"
 	tdns "github.com/johanix/tdns/v2"
-	"github.com/johanix/tdns/v2/hpke"
-	"gopkg.in/yaml.v3"
 )
 
 func main() {
@@ -40,7 +39,8 @@ func main() {
 
 	// Parse KRS configuration section from config file
 	// This must be done after MainInit (which calls ParseConfig) but before startKrs
-	if err := tnm.ParseKrsConfigFromFile(conf); err != nil {
+	krsConf, err := tnm.ParseKrsConfigFromFile(conf)
+	if err != nil {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error parsing KRS config: %v", err))
 	}
 
@@ -65,7 +65,7 @@ func main() {
 	}()
 
 	// Initialize KRS (replaces conf.StartKrs())
-	err = startKrs(ctx, conf, apirouter)
+	err = startKrs(ctx, conf, krsConf, apirouter)
 	if err != nil {
 		// Print error to stdout/stderr for visibility
 		fmt.Fprintf(os.Stderr, "FATAL: Error starting KRS: %v\n", err)
@@ -78,31 +78,13 @@ func main() {
 
 // startKrs initializes and starts all KRS subsystems
 // This replaces the tdns.StartKrs() function but uses tdns-nm packages
-func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) error {
-	// Parse KRS configuration from stored YAML bytes
-	var krsConf tnm.KrsConf
-
-	// conf.Internal.KrsConf is either []byte (YAML) or already *tnm.KrsConf
-	switch v := conf.Internal.KrsConf.(type) {
-	case []byte:
-		// Unmarshal YAML bytes into tnm.KrsConf
-		if err := yaml.Unmarshal(v, &krsConf); err != nil {
-			return fmt.Errorf("failed to unmarshal KRS config: %v", err)
-		}
-		conf.Internal.KrsConf = &krsConf
-	case *tnm.KrsConf:
-		krsConf = *v
-	default:
-		return fmt.Errorf("KRS configuration not found or invalid type (got %T)", conf.Internal.KrsConf)
-	}
-
+func startKrs(ctx context.Context, conf *tdns.Config, krsConf *tnm.KrsConf, apirouter *mux.Router) error {
 	// Initialize KRS database
 	krsDB, err := krs.NewKrsDB(krsConf.Database.DSN)
 	if err != nil {
 		// Return detailed error message (already includes helpful instructions)
 		return fmt.Errorf("failed to initialize KRS database: %v", err)
 	}
-	conf.Internal.KrsDB = krsDB
 
 	// Determine which crypto backends are supported
 	// If SupportedCrypto is empty, infer from configured key paths
@@ -199,7 +181,7 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	}
 	// Call SetupKrsAPIRoutes directly on the router (not via RegisterAPIRoute)
 	// because SetupAPIRouter has already been called and returned
-	krs.SetupKrsAPIRoutes(apirouter, krsDB, &krsConf, confMap, tdns.APIping(conf))
+	krs.SetupKrsAPIRoutes(apirouter, krsDB, krsConf, confMap, tdns.APIping(conf))
 	log.Printf("KRS: API routes setup")
 
 	// Start API dispatcher
@@ -233,7 +215,7 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	// Register KRS NOTIFY handler (handles all NOTIFYs for control zone and distributions)
 	// KRS handles NOTIFYs for any qtype, so we register with qtype=0 (all NOTIFYs)
 	krsNotifyHandler := func(ctx context.Context, dnr *tdns.DnsNotifyRequest) error {
-		return krs.HandleKrsNotify(ctx, dnr, krsDB, &krsConf)
+		return krs.HandleKrsNotify(ctx, dnr, krsDB, krsConf)
 	}
 	if err := tdns.RegisterNotifyHandler(0, krsNotifyHandler); err != nil {
 		return fmt.Errorf("failed to register KRS NOTIFY handler: %v", err)

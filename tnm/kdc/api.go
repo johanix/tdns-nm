@@ -2993,7 +2993,7 @@ func APIKdcCatalog(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 
 				log.Printf("KDC API: Generating catalog zone: %s", catalogZoneName)
 				// Get DnsEngine addresses from tdns.Conf (for API compatibility, though not used for NS records)
-				dnsEngineAddresses := tdns.Conf.DnsEngine.Addresses
+				dnsEngineAddresses := tdns.Conf.Listeners.Addresses
 				// Call kdc.GenerateCatalogZone (KDC-specific function in tnm/kdc/catalog.go)
 				zd, err := kdcDB.GenerateCatalogZone(catalogZoneName, dnsEngineAddresses)
 				if err != nil {

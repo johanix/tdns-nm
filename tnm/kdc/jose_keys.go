@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/tdns/v2/crypto"
-	_ "github.com/johanix/tdns/v2/crypto/jose"
+	"github.com/johanix/tdns-transport/v2/crypto"
+	_ "github.com/johanix/tdns-transport/v2/crypto/jose"
 )
 
 // KdcJoseKeys manages the KDC's JOSE keypair

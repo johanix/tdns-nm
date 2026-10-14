@@ -249,7 +249,7 @@ func InitializeCatalogZone(
 	}
 
 	// Get DnsEngine addresses from tdns.Conf (for API compatibility, though not used for NS records)
-	dnsEngineAddresses := tdns.Conf.DnsEngine.Addresses
+	dnsEngineAddresses := tdns.Conf.Listeners.Addresses
 
 	// Generate catalog zone
 	zd, err := kdcDB.GenerateCatalogZone(catalogZoneName, dnsEngineAddresses)

@@ -16,8 +16,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/johanix/tdns/v2/crypto"
-	"github.com/johanix/tdns/v2/crypto/hpke"
+	"github.com/johanix/tdns-nm/tnm/crypto/hpke"
+	"github.com/johanix/tdns-transport/v2/crypto"
 )
 
 // KdcHpkeSigningKeys manages the KDC's HPKE signing keypair (P-256 ECDSA)

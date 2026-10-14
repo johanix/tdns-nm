@@ -19,12 +19,13 @@ import (
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
+	nmdistrib "github.com/johanix/tdns-nm/tnm/distrib"
+	"github.com/johanix/tdns-transport/v2/crypto"
+	"github.com/johanix/tdns-transport/v2/distrib"
+	"github.com/johanix/tdns-transport/v2/hpke"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/crypto"
-	"github.com/johanix/tdns/v2/distrib"
 	"github.com/johanix/tdns/v2/edns0"
-	"github.com/johanix/tdns/v2/hpke"
 	"github.com/miekg/dns"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
@@ -155,8 +156,8 @@ func ExtractManifestFromCHUNK(chunk *core.CHUNK) (*distrib.ManifestData, error) 
 
 // ExtractJWTManifestFromCHUNK extracts JWT manifest data from a CHUNK manifest chunk
 // This verifies the JWT signature using the provided verification key
-func ExtractJWTManifestFromCHUNK(chunk *core.CHUNK, verificationKey crypto.PublicKey, backend crypto.Backend) (*distrib.JWTManifestData, error) {
-	return distrib.ExtractJWTManifestData(chunk, verificationKey, backend)
+func ExtractJWTManifestFromCHUNK(chunk *core.CHUNK, verificationKey crypto.PublicKey, backend crypto.Backend) (*nmdistrib.JWTManifestData, error) {
+	return nmdistrib.ExtractJWTManifestData(chunk, verificationKey, backend)
 }
 
 // ReassembleCHUNKChunks reassembles CHUNK chunks into complete data
@@ -264,7 +265,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 		}
 
 		// Convert JWT manifest to legacy ManifestData format for processing
-		manifestData = distrib.ConvertJWTClaimsToManifestData(&jwtManifest.Claims, jwtManifest.Payload)
+		manifestData = nmdistrib.ConvertJWTClaimsToManifestData(&jwtManifest.Claims, jwtManifest.Payload)
 
 		log.Printf("KRS: Extracted JWT manifest: content=%s, crypto=%s, chunk_count=%d",
 			contentType, cryptoBackend, manifestData.ChunkCount)
@@ -712,7 +713,7 @@ func decryptPayload(conf *tnm.KrsConf, data []byte, cryptoBackend string) ([]byt
 		if kdcVerificationKey != nil {
 			// Use signed decryption (JWS(JWE))
 			log.Printf("KRS: Using signed decryption (verifying JWS signature before decrypting JWE)")
-			plaintextJSON, err = distrib.DecodeDecryptAndVerify(backend, privKey, kdcVerificationKey, data)
+			plaintextJSON, err = nmdistrib.DecodeDecryptAndVerify(backend, privKey, kdcVerificationKey, data)
 			if err != nil {
 				return nil, fmt.Errorf("failed to decrypt and verify distribution payload with %s backend: %v", backend.Name(), err)
 			}
@@ -720,7 +721,7 @@ func decryptPayload(conf *tnm.KrsConf, data []byte, cryptoBackend string) ([]byt
 		} else {
 			// Use unsigned decryption (backward compatibility)
 			log.Printf("KRS: Using unsigned decryption (no signature verification)")
-			plaintextJSON, err = distrib.DecodeAndDecrypt(backend, privKey, data)
+			plaintextJSON, err = nmdistrib.DecodeAndDecrypt(backend, privKey, data)
 			if err != nil {
 				return nil, fmt.Errorf("failed to decrypt distribution payload with %s backend: %v", backend.Name(), err)
 			}

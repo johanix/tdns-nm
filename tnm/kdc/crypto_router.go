@@ -12,9 +12,9 @@ import (
 	"log"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
-	"github.com/johanix/tdns/v2/crypto"
-	_ "github.com/johanix/tdns/v2/crypto/hpke" // Auto-register HPKE backend
-	_ "github.com/johanix/tdns/v2/crypto/jose" // Auto-register JOSE backend
+	_ "github.com/johanix/tdns-nm/tnm/crypto/hpke" // Auto-register HPKE backend
+	"github.com/johanix/tdns-transport/v2/crypto"
+	_ "github.com/johanix/tdns-transport/v2/crypto/jose" // Auto-register JOSE backend
 )
 
 // EncryptKeyForNode encrypts a DNSSEC key's private key material for a specific node.

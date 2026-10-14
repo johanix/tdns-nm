@@ -8,8 +8,8 @@
 package tnm
 
 import (
+	"github.com/johanix/tdns-transport/v2/distrib"
 	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/distrib"
 )
 
 // SplitIntoCHUNKs splits data into CHUNK records of specified size

@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/hpke"
 	"github.com/johanix/tdns/v2"
-	"github.com/johanix/tdns/v2/hpke"
 	"github.com/spf13/cobra"
 )
 

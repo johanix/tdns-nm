@@ -8,7 +8,7 @@
 package tnm
 
 import (
-	"github.com/johanix/tdns/v2/distrib"
+	"github.com/johanix/tdns-transport/v2/distrib"
 )
 
 // CreateManifestMetadata creates base metadata for a distribution manifest

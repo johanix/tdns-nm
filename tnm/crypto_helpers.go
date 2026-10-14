@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/johanix/tdns/v2/crypto"
-	_ "github.com/johanix/tdns/v2/crypto/hpke" // Auto-register HPKE backend
-	_ "github.com/johanix/tdns/v2/crypto/jose" // Auto-register JOSE backend
+	_ "github.com/johanix/tdns-nm/tnm/crypto/hpke" // Auto-register HPKE backend
+	"github.com/johanix/tdns-transport/v2/crypto"
+	_ "github.com/johanix/tdns-transport/v2/crypto/jose" // Auto-register JOSE backend
 )
 
 // SelectBackend selects a crypto backend based on supported crypto list and forced preference.

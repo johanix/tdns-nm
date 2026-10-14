@@ -19,12 +19,12 @@ import (
 	"time"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
+	"github.com/johanix/tdns-transport/v2/crypto"
+	_ "github.com/johanix/tdns-transport/v2/crypto/jose" // Auto-register JOSE backend
+	"github.com/johanix/tdns-transport/v2/hpke"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/crypto"
-	_ "github.com/johanix/tdns/v2/crypto/jose" // Auto-register JOSE backend
 	"github.com/johanix/tdns/v2/edns0"
-	"github.com/johanix/tdns/v2/hpke"
 	"github.com/miekg/dns"
 )
 

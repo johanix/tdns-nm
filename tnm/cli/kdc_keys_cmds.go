@@ -13,10 +13,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/johanix/tdns/v2/crypto"
-	hpkebackend "github.com/johanix/tdns/v2/crypto/hpke"
-	_ "github.com/johanix/tdns/v2/crypto/jose"
-	"github.com/johanix/tdns/v2/hpke"
+	hpkebackend "github.com/johanix/tdns-nm/tnm/crypto/hpke"
+	"github.com/johanix/tdns-transport/v2/crypto"
+	_ "github.com/johanix/tdns-transport/v2/crypto/jose"
+	"github.com/johanix/tdns-transport/v2/hpke"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 

@@ -11,7 +11,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/johanix/tdns/v2/hpke"
+	"github.com/johanix/tdns-transport/v2/hpke"
 )
 
 // DecryptAndStoreKeyV1 decrypts encrypted key data using HPKE and stores the key in the database (V1 implementation)

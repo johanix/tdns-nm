@@ -13,7 +13,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/johanix/tdns/v2/crypto"
+	"github.com/johanix/tdns-transport/v2/crypto"
 )
 
 // DecryptAndStoreKeyV2 decrypts encrypted key data using crypto abstraction layer

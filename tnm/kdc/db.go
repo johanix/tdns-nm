@@ -20,8 +20,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql" // MariaDB driver
 	tnm "github.com/johanix/tdns-nm/tnm"
-	_ "github.com/johanix/tdns/v2/crypto/jose" // Auto-register JOSE backend
-	"github.com/johanix/tdns/v2/hpke"
+	_ "github.com/johanix/tdns-transport/v2/crypto/jose" // Auto-register JOSE backend
 	"github.com/miekg/dns"
 )
 
@@ -1883,7 +1882,7 @@ func (kdc *KdcDB) addDistributionRecordTx(tx *sql.Tx, record *DistributionRecord
 }
 
 // UpdateDistributionStatus updates a distribution record's status
-func (kdc *KdcDB) UpdateDistributionStatus(distributionID string, status hpke.DistributionStatus) error {
+func (kdc *KdcDB) UpdateDistributionStatus(distributionID string, status DistributionStatus) error {
 	_, err := kdc.DB.Exec(
 		"UPDATE distribution_records SET status = ? WHERE distribution_id = ?",
 		status, distributionID,
@@ -2342,7 +2341,7 @@ func (kdc *KdcDB) GetDistributionRecordsForZoneKey(zoneName, keyID string) ([]*D
 				record.Payload = payload
 			}
 		}
-		record.Status = hpke.DistributionStatus(statusStr)
+		record.Status = DistributionStatus(statusStr)
 		records = append(records, record)
 	}
 	return records, rows.Err()
@@ -2500,7 +2499,7 @@ func (kdc *KdcDB) CreatePingOperation(nodeID string, kdcConf *tnm.KdcConf, force
 		EphemeralPubKey: ephemeralPub, // Ephemeral key for HPKE
 		CreatedAt:       time.Now(),
 		ExpiresAt:       expiresAt,
-		Status:          hpke.DistributionStatusPending,
+		Status:          DistributionStatusPending,
 		DistributionID:  distributionID,
 		Operation:       string(OperationPing),
 		Payload:         payload,
@@ -2587,7 +2586,7 @@ func (kdc *KdcDB) CreateDeleteKeyOperation(zoneName, keyID, nodeID, reason strin
 		EphemeralPubKey: ephemeralPub, // Ephemeral public key for decryption
 		CreatedAt:       time.Now(),
 		ExpiresAt:       nil,
-		Status:          hpke.DistributionStatusPending,
+		Status:          DistributionStatusPending,
 		DistributionID:  distributionID,
 		Operation:       string(OperationDeleteKey),
 		Payload:         payload,
@@ -2663,7 +2662,7 @@ func (kdc *KdcDB) CreateRollKeyOperation(newKey *DNSSECKey, oldKeyID string, nod
 		EphemeralPubKey: ephemeralPubKey,
 		CreatedAt:       time.Now(),
 		ExpiresAt:       expiresAt,
-		Status:          hpke.DistributionStatusPending,
+		Status:          DistributionStatusPending,
 		DistributionID:  distributionID,
 		Operation:       string(OperationRollKey),
 		Payload:         payload,
@@ -3613,7 +3612,7 @@ func (kdc *KdcDB) CreateNodeComponentsDistribution(nodeID string, components []s
 		EphemeralPubKey: ephemeralPub,
 		CreatedAt:       time.Now(),
 		ExpiresAt:       expiresAt,
-		Status:          hpke.DistributionStatusPending,
+		Status:          DistributionStatusPending,
 		DistributionID:  distributionID,
 		Operation:       "update_components",
 		Payload:         payload,

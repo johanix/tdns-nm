@@ -22,7 +22,6 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"gopkg.in/yaml.v3"
 )
 
 func main() {
@@ -42,7 +41,8 @@ func main() {
 
 	// Parse KDC configuration section from config file
 	// This must be done after MainInit (which calls ParseConfig) but before startKdc
-	if err := tnm.ParseKdcConfigFromFile(conf); err != nil {
+	kdcConf, err := tnm.ParseKdcConfigFromFile(conf)
+	if err != nil {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error parsing KDC config: %v", err))
 	}
 
@@ -68,7 +68,7 @@ func main() {
 
 	// Initialize KDC (replaces conf.StartKdc())
 	// Note: This will also register KDC API routes directly on apirouter
-	err = startKdc(ctx, conf, apirouter)
+	err = startKdc(ctx, conf, kdcConf, apirouter)
 	if err != nil {
 		// Print error to stdout so user sees it immediately
 		fmt.Fprintf(os.Stdout, "\n%s\n\n", err.Error())
@@ -81,24 +81,7 @@ func main() {
 
 // startKdc initializes and starts all KDC subsystems
 // This replaces the tdns.StartKdc() function but uses tdns-nm packages
-func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) error {
-	// Parse KDC configuration from stored YAML bytes
-	var kdcConf tnm.KdcConf
-
-	// conf.Internal.KdcConf is either []byte (YAML) or already *tnm.KdcConf
-	switch v := conf.Internal.KdcConf.(type) {
-	case []byte:
-		// Unmarshal YAML bytes into tnm.KdcConf
-		if err := yaml.Unmarshal(v, &kdcConf); err != nil {
-			return fmt.Errorf("failed to unmarshal KDC config: %v", err)
-		}
-		conf.Internal.KdcConf = &kdcConf
-	case *tnm.KdcConf:
-		kdcConf = *v
-	default:
-		return fmt.Errorf("KDC configuration not found or invalid type (got %T)", conf.Internal.KdcConf)
-	}
-
+func startKdc(ctx context.Context, conf *tdns.Config, kdcConf *tnm.KdcConf, apirouter *mux.Router) error {
 	// Validate HPKE key configuration BEFORE initializing database
 	// This is critical - KDC cannot function without a valid HPKE keypair
 	if kdcConf.KdcHpkePrivKey == "" {
@@ -147,14 +130,13 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 		log.Printf("KDC: Warning: kdc_jose_priv_key not configured; JOSE enrollment/key distribution will fail")
 	}
 
-	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN, &kdcConf)
+	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN, kdcConf)
 	if err != nil {
 		return fmt.Errorf("failed to initialize KDC database: %v", err)
 	}
-	conf.Internal.KdcDB = kdcDB
 
 	// Initialize catalog zone if configured (auto-generate on startup)
-	if err := kdc.InitializeCatalogZone(ctx, kdcDB, &kdcConf); err != nil {
+	if err := kdc.InitializeCatalogZone(ctx, kdcDB, kdcConf); err != nil {
 		return fmt.Errorf("failed to initialize catalog zone: %v", err)
 	}
 
@@ -166,9 +148,9 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 			"Addresses": conf.ApiServer.Addresses,
 		},
 		"DnsEngine": map[string]interface{}{
-			"Addresses": conf.DnsEngine.Addresses,
+			"Addresses": conf.Listeners.Addresses,
 		},
-		"KdcConf": &kdcConf,
+		"KdcConf": kdcConf,
 	}
 	// Call SetupKdcAPIRoutes directly on the router (not via RegisterAPIRoute)
 	// because SetupAPIRouter has already been called and returned
@@ -206,7 +188,7 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 			Options:        dqr.Options,
 		}
 		// Call KDC handler (will return ErrNotHandled for unsupported qtypes)
-		return kdc.HandleKdcQuery(ctx, kdcReq, kdcDB, &kdcConf)
+		return kdc.HandleKdcQuery(ctx, kdcReq, kdcDB, kdcConf)
 	}
 
 	// Register handlers for each qtype that KDC handles
@@ -239,7 +221,7 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 			log.Printf("KDC: NotifyHandler callback invoked (qname=%s)", dnr.Qname)
 		}
 		// Call KDC NOTIFY handler
-		return kdc.HandleKdcNotify(ctx, dnr.Msg, dnr.Qname, dnr.ResponseWriter, kdcDB, &kdcConf)
+		return kdc.HandleKdcNotify(ctx, dnr.Msg, dnr.Qname, dnr.ResponseWriter, kdcDB, kdcConf)
 	}
 	if err := tdns.RegisterNotifyHandler(core.TypeCHUNK, kdcNotifyHandler); err != nil {
 		return fmt.Errorf("failed to register CHUNK NOTIFY handler: %v", err)
@@ -263,7 +245,7 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 			log.Printf("KDC: EnrollmentUpdateHandler invoked (qname=%s)", dur.Qname)
 		}
 		// Call KDC enrollment handler
-		return kdc.HandleEnrollmentUpdate(ctx, dur, kdcDB, &kdcConf)
+		return kdc.HandleEnrollmentUpdate(ctx, dur, kdcDB, kdcConf)
 	}
 
 	if err := tdns.RegisterUpdateHandler(enrollmentMatcher, enrollmentUpdateHandler); err != nil {
@@ -279,7 +261,7 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 	}
 
 	if err := tdns.RegisterEngine("KeyStateWorker", func(ctx context.Context) error {
-		return kdc.KeyStateWorker(ctx, kdcDB, &kdcConf)
+		return kdc.KeyStateWorker(ctx, kdcDB, kdcConf)
 	}); err != nil {
 		return fmt.Errorf("failed to register KeyStateWorker: %v", err)
 	}
