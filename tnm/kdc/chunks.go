@@ -8,14 +8,12 @@ package kdc
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -23,7 +21,6 @@ import (
 
 	nmdistrib "github.com/johanix/tdns-nm/tnm/distrib"
 	"github.com/johanix/tdns-transport/v2/crypto"
-	"github.com/johanix/tdns-transport/v2/distrib"
 	"github.com/johanix/tdns/v2/core"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
@@ -291,31 +288,29 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	// Not in cache, prepare chunks
 	log.Printf("KDC: Preparing %s chunks for node %s, distribution %s", contentType, nodeID, distributionID)
 
-	// Get the node to access its long-term JOSE public key (encryption and HMAC)
+	// Get the node: its JOSE public key is the encryption key for encrypted_text
 	node, err := kdc.GetNode(nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
-	hmacKey, err := nodeJoseHMACKey(node)
+
+	// Every distribution is signed by the KDC, a clear text one included
+	backend, err := crypto.GetBackend("jose")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get JOSE backend: %v", err)
+	}
+	joseKeys, err := GetKdcJoseKeypair(conf.KdcJosePrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load KDC JOSE signing key: %v", err)
 	}
 
 	var dataToChunk []byte
 
 	if contentType == "encrypted_text" {
 		// Encrypt the text to the node and sign it with the KDC key: JWS(JWE(text))
-		backend, err := crypto.GetBackend("jose")
-		if err != nil {
-			return nil, fmt.Errorf("failed to get JOSE backend: %v", err)
-		}
 		nodePubKey, err := backend.ParsePublicKey(node.LongTermJosePubKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse node JOSE public key: %v", err)
-		}
-		joseKeys, err := GetKdcJoseKeypair(conf.KdcJosePrivKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load KDC JOSE signing key: %v", err)
 		}
 		dataToChunk, err = nmdistrib.EncryptSignAndEncode(backend, nodePubKey, []byte(text), joseKeys.PrivateKey, nil)
 		if err != nil {
@@ -327,89 +322,22 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 		dataToChunk = []byte(base64.StdEncoding.EncodeToString([]byte(text)))
 	}
 
-	// Calculate checksum
-	hash := sha256.Sum256(dataToChunk)
-	checksum := fmt.Sprintf("sha256:%x", hash)
-
-	// Determine if payload should be included inline
-	payloadSize := len(dataToChunk)
-	testMetadata := map[string]interface{}{
-		"content":         contentType,
-		"distribution_id": distributionID,
-		"node_id":         nodeID,
-		"text_length":     len(text),
+	claims := &nmdistrib.JWTManifestClaims{
+		Issuer:         "kdc",
+		Subject:        "distribution",
+		IssuedAt:       time.Now().Unix(),
+		DistributionID: distributionID,
+		ReceiverID:     nodeID,
+		Content:        contentType,
+		Crypto:         "jose",
 	}
-	testSize := distrib.EstimateManifestSize(testMetadata, dataToChunk)
-
-	// Check if the manifest fits in DNS message
-	const estimatedDNSOverhead = 150
-	estimatedTotalSize := estimatedDNSOverhead + testSize
-	includeInline := distrib.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
-
-	var dataChunks []*core.CHUNK
-	var chunkCount uint16
-	var chunkSize uint16
-
-	if includeInline {
-		// Payload fits inline, include it directly in manifest
-		chunkCount = 0
-		chunkSize = 0
-		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest",
-			payloadSize, testSize, estimatedTotalSize)
-	} else {
-		// Payload is too large, split into chunks
-		chunkSizeInt := conf.GetChunkMaxSize()
-		dataChunks = distrib.SplitIntoCHUNKs(dataToChunk, chunkSizeInt, core.FormatJSON)
-		// Check if SplitIntoCHUNKs returned nil (indicates overflow)
-		if dataChunks == nil && len(dataToChunk) > 0 {
-			return nil, fmt.Errorf("failed to split payload into chunks: overflow detected (payload size: %d bytes, chunk size: %d bytes)", len(dataToChunk), chunkSizeInt)
-		}
-		// Check for integer overflow before converting to uint16
-		if len(dataChunks) > math.MaxUint16 {
-			return nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
-		}
-		if chunkSizeInt > math.MaxUint16 {
-			return nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
-		}
-		chunkCount = uint16(len(dataChunks))
-		chunkSize = uint16(chunkSizeInt)
-		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
-			payloadSize, testSize, estimatedTotalSize, chunkCount)
+	if conf.GetDistributionTTL() > 0 {
+		claims.DistributionTTL = conf.GetDistributionTTL().String()
 	}
-
-	// Create manifest data
-	extraFields := map[string]interface{}{
-		"text_length": len(text),
-	}
-	metadata := tnm.CreateManifestMetadata(contentType, distributionID, nodeID, extraFields)
-	manifestData := &distrib.ManifestData{
-		ChunkCount: chunkCount,
-		ChunkSize:  chunkSize,
-		Metadata:   metadata,
-	}
-
-	// Include payload inline if it fits
-	if includeInline {
-		manifestData.Payload = make([]byte, len(dataToChunk))
-		copy(manifestData.Payload, dataToChunk)
-	}
-
-	// Create manifest CHUNK (Sequence=0, Total=chunkCount)
-	manifestCHUNK, err := distrib.CreateCHUNKManifest(manifestData, core.FormatJSON)
+	allChunks, checksum, err := signedManifestChunks(dataToChunk, claims, joseKeys.PrivateKey, backend, conf)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
+		return nil, err
 	}
-
-	// Calculate HMAC using the recipient node's long-term public key
-	if err := distrib.CalculateCHUNKHMAC(manifestCHUNK, hmacKey); err != nil {
-		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
-	}
-	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifestCHUNK.HMAC))
-
-	// Create CHUNK records (manifest + data chunks)
-	allChunks := make([]*core.CHUNK, 0)
-	allChunks = append(allChunks, manifestCHUNK)
-	allChunks = append(allChunks, dataChunks...)
 
 	prepared := &preparedChunks{
 		chunks:    allChunks,

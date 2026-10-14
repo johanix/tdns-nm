@@ -104,6 +104,12 @@ func startKrs(ctx context.Context, conf *tdns.Config, krsConf *tnm.KrsConf, apir
 
 	log.Printf("KRS: JOSE keypair configured at %s (will be loaded on demand)", krsConf.Node.LongTermJosePrivKey)
 
+	// The KDC's JOSE public key verifies every distribution
+	if err := krs.CheckKdcVerificationKey(krsConf); err != nil {
+		return fmt.Errorf("KDC verification key: %v", err)
+	}
+	log.Printf("KRS: KDC JOSE verification key loaded from %s", krsConf.Node.KdcJosePubKey)
+
 	// Store node config in database
 	nodeConfig := &krs.NodeConfig{
 		ID:           krsConf.Node.ID,

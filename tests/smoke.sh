@@ -5,7 +5,7 @@
 # Runs a KDC and a KRS on 127.0.0.1 from the binaries built in this tree
 # (run "make" first), enrolls one node and exercises enrollment, ping,
 # component assignment, key distribution, key deletion and the test text
-# distributions. Everything lives in a temporary directory; both daemons
+# distributions, and checks that a KRS without the KDC's key refuses to start. Everything lives in a temporary directory; both daemons
 # are stopped on exit.
 #
 # usage: tests/smoke.sh [workdir]
@@ -150,6 +150,24 @@ grep -q "Enrollment completed successfully" "$W/out/krs-enroll" && res krs-enrol
 
 (cd "$W/krs" && exec "$ROOT/cmd/tdns-krs/tdns-krs" --config "$W/krs/tdns-krs.yaml" > "$W/krs/stdout.log" 2>&1) &
 waitfor "$KRSLOG" "KRS started successfully" 20 && res krs-start PASS || res krs-start "FAIL $(tail -1 "$W/krs/stdout.log" | cut -c1-110)"
+
+# A KRS without the KDC's JOSE public key cannot verify a distribution: it must refuse to start
+sed -e '/kdc_jose_pubkey:/d' -e "s#$W/krs/krs.db#$W/krs/nokey.db#" -e "s#$KRSLOG#$W/krs/nokey.log#" \
+	"$W/krs/tdns-krs.yaml" > "$W/krs/nokey.yaml"
+(cd "$W/krs" && exec "$ROOT/cmd/tdns-krs/tdns-krs" --config "$W/krs/nokey.yaml" > "$W/out/krs-nokey" 2>&1) &
+NOKEY=$!
+for ((i = 0; i < 40; i++)); do
+	kill -0 $NOKEY 2>/dev/null || break
+	sleep 0.25
+done
+if kill -0 $NOKEY 2>/dev/null; then
+	kill $NOKEY
+	res krs-needs-kdc-key "FAIL started without kdc_jose_pubkey"
+elif grep -q "KDC verification key" "$W/out/krs-nokey"; then
+	res krs-needs-kdc-key PASS
+else
+	res krs-needs-kdc-key "FAIL $(lastline krs-nokey)"
+fi
 
 # Ping
 run ping $KCLI node ping --nodeid node1.test.
