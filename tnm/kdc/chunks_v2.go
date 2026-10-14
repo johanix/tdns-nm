@@ -31,13 +31,16 @@ import (
 // based on the node's SupportedCrypto field.
 // This is a convenience wrapper around tnm.SelectBackend that works with Node structs.
 // forcedCrypto: if provided (e.g. "jose"), forces that backend (if node supports it)
-// Returns the backend name (e.g., "jose")
-func selectBackendForNode(node *Node, forcedCrypto string) string {
-	backendName := tnm.SelectBackend(node.SupportedCrypto, forcedCrypto)
+// Returns the backend name (e.g., "jose"), or an error when the node lists no available backend
+func selectBackendForNode(node *Node, forcedCrypto string) (string, error) {
+	backendName, err := tnm.SelectBackend(node.SupportedCrypto, forcedCrypto)
+	if err != nil {
+		return "", fmt.Errorf("node %s: %v", node.ID, err)
+	}
 	if forcedCrypto != "" && backendName != forcedCrypto {
 		log.Printf("KDC: Warning: Node %s does not support forced crypto backend %s, auto-selected %s instead", node.ID, forcedCrypto, backendName)
 	}
-	return backendName
+	return backendName, nil
 }
 
 // determineContentType analyzes distribution records to determine the content type
@@ -441,7 +444,10 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	}
 
 	// Select crypto backend - use stored one if available, otherwise auto-select
-	backendName := selectBackendForNode(node, forcedCrypto)
+	backendName, err := selectBackendForNode(node, forcedCrypto)
+	if err != nil {
+		return nil, err
+	}
 	backend, err := crypto.GetBackend(backendName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get crypto backend %s: %v", backendName, err)

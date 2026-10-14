@@ -16,33 +16,38 @@ import (
 	_ "github.com/johanix/tdns-transport/v2/crypto/jose" // Auto-register JOSE backend
 )
 
-// SelectBackend selects a crypto backend based on supported crypto list and forced preference.
-// This is a generic version that works with any supported crypto list (not just Node structs).
+// SelectBackend selects the crypto backend for a peer from its supported list:
+// the forced backend when the list has it and it is available here, otherwise
+// the first listed backend that is available here. An empty list means JOSE.
+// A list with no available backend (such as a stored "hpke", from before JOSE
+// was the only backend) is an error.
 //
 // Parameters:
 //   - supportedCrypto: List of supported backends (e.g., []string{"jose"})
 //   - forcedCrypto: Optional backend to force (e.g. "jose"); empty string auto-selects
-//
-// Returns:
-//   - backendName: The selected backend name (e.g. "jose")
-func SelectBackend(supportedCrypto []string, forcedCrypto string) string {
-	// If forced crypto is specified, use it if supported
-	if forcedCrypto != "" {
-		for _, supported := range supportedCrypto {
-			if supported == forcedCrypto {
-				return forcedCrypto
-			}
-		}
-		// Forced crypto not supported - fall through to auto-select
-		log.Printf("TNM: Warning: Forced crypto backend %s not in supported list %v, auto-selecting instead", forcedCrypto, supportedCrypto)
+func SelectBackend(supportedCrypto []string, forcedCrypto string) (string, error) {
+	if len(supportedCrypto) == 0 {
+		return "jose", nil
 	}
 
-	// Use the first supported backend
-	if len(supportedCrypto) > 0 {
-		return supportedCrypto[0]
+	// If forced crypto is specified, use it if supported and available
+	if forcedCrypto != "" {
+		for _, supported := range supportedCrypto {
+			if supported == forcedCrypto && crypto.IsBackendRegistered(forcedCrypto) {
+				return forcedCrypto, nil
+			}
+		}
+		// Forced crypto not usable - fall through to auto-select
+		log.Printf("TNM: Warning: Forced crypto backend %s not in supported list %v or not available, auto-selecting instead", forcedCrypto, supportedCrypto)
 	}
-	// JOSE is the default when no supported crypto is specified
-	return "jose"
+
+	// Use the first supported backend that is available
+	for _, name := range supportedCrypto {
+		if crypto.IsBackendRegistered(name) {
+			return name, nil
+		}
+	}
+	return "", fmt.Errorf("none of the supported crypto backends %v is available", supportedCrypto)
 }
 
 // ExtractEphemeralKey extracts the ephemeral public key from ciphertext using the backend's GetEphemeralKey method.

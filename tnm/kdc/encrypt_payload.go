@@ -34,7 +34,10 @@ func EncryptPayloadForNode(node *Node, plaintext []byte, forcedCrypto string) (c
 	}
 
 	// Select crypto backend based on node capabilities and forced preference
-	backendName = selectBackendForNode(node, forcedCrypto)
+	backendName, err = selectBackendForNode(node, forcedCrypto)
+	if err != nil {
+		return nil, nil, "", err
+	}
 
 	// Extract node's public key based on selected backend
 	var nodePubKeyData []byte

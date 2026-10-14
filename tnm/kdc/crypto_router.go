@@ -41,7 +41,10 @@ func (kdc *KdcDB) EncryptKeyForNodeWithCrypto(
 	distributionID ...string,
 ) (encryptedKey []byte, ephemeralPubKey []byte, distID string, err error) {
 	// Select backend for this node
-	backendName := selectBackendForNode(node, forcedCrypto)
+	backendName, err := selectBackendForNode(node, forcedCrypto)
+	if err != nil {
+		return nil, nil, "", err
+	}
 	backend, err := crypto.GetBackend(backendName)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("failed to get crypto backend %s: %v", backendName, err)
