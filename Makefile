@@ -16,5 +16,9 @@ install:
 	$(MAKE) -C ./cmd/kdc-cli install
 	$(MAKE) -C ./cmd/krs-cli install
 
+# Run a KDC and a KRS on 127.0.0.1 and exercise the four programs
+smoke: all
+	/bin/bash tests/smoke.sh
+
 include utils/Makefile.common
 
