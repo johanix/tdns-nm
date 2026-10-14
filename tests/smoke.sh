@@ -250,6 +250,16 @@ for ct in clear_text encrypted_text; do
 	grep -q -F "$TEXT" "$W/out/fetch-$ct" && res "text-$ct" PASS || res "text-$ct" "FAIL $(lastline fetch-$ct)"
 done
 
+# A payload too big for the manifest goes as data chunks, bound to the signed manifest by chunk_hash
+awk 'BEGIN { for (i = 0; i < 3000; i++) printf "line %05d of the large smoke test text, padded out to make it long\n", i }' > "$W/large.txt"
+run gen-large $KCLI debug distrib generate --distid 1a7e --nodeid node1.test. --file "$W/large.txt" --content-type clear_text
+run fetch-large $RCLI debug distrib fetch --id 1a7e
+if grep -q -F "line 02999 of the large smoke test text" "$W/out/fetch-large" && grep -q "Reassembled .* from [0-9]* CHUNK chunks" "$KRSLOG"; then
+	res text-chunked "PASS ($(grep -o 'Reassembled .* CHUNK chunks' "$KRSLOG" | tail -1))"
+else
+	res text-chunked "FAIL $(lastline fetch-large)"
+fi
+
 # Listings
 run node-list $KCLI node list
 grep -q node1.test. "$W/out/node-list" && res kdc-node-list PASS || res kdc-node-list "FAIL $(lastline node-list)"

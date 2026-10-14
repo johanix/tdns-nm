@@ -8,6 +8,7 @@
 package krs
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -187,6 +188,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 	var retireTime string
 	var distributionTimestamp int64
 	var distributionTTL time.Duration
+	var chunkHash string
 
 	if distrib.IsJWTManifest(manifestChunk) {
 		// JWT format - extract with signature verification
@@ -232,6 +234,7 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 			cryptoBackend = "jose" // Default for JWT format
 		}
 		retireTime = jwtManifest.Claims.RetireTime
+		chunkHash = jwtManifest.Claims.ChunkHash
 		distributionTimestamp = jwtManifest.Claims.IssuedAt
 
 		// Parse distribution TTL
@@ -306,6 +309,15 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 		log.Printf("KRS: Reassembled %d bytes from %d CHUNK chunks", len(reassembled), len(chunks))
 	} else {
 		return fmt.Errorf("CHUNK manifest has no payload and chunk_count is 0")
+	}
+
+	// The payload must be the one the signed manifest names: an inline payload
+	// is inside the signature already, data chunks are bound to it by chunk_hash
+	if chunkHash == "" {
+		return fmt.Errorf("distribution %s: signed manifest carries no chunk_hash", distributionID)
+	}
+	if got := fmt.Sprintf("sha256:%x", sha256.Sum256(reassembled)); got != chunkHash {
+		return fmt.Errorf("distribution %s: payload hash %s does not match the signed chunk_hash %s", distributionID, got, chunkHash)
 	}
 
 	// Process based on content type
