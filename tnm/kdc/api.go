@@ -624,31 +624,27 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 									log.Printf("KDC: Encrypted key for %d/%d nodes serving zone %s", encryptedCount, len(nodes), req.ZoneName)
 								}
 
-								// Distribute active KSK for edgesign_full zones
+								// Distribute active KSK for edgesign_full zones, in the same
+								// distribution as the ZSK: that is the id the NOTIFY below names
 								if activeKSK != nil {
-									kskDistributionID, err := kdcDB.GetOrCreateDistributionID(req.ZoneName, activeKSK)
-									if err != nil {
-										log.Printf("KDC: Warning: Failed to get/create distribution ID for KSK %s: %v", activeKSK.ID, err)
+									// Transition to active_dist state
+									if err := kdcDB.UpdateKeyState(req.ZoneName, activeKSK.ID, KeyStateActiveDist); err != nil {
+										log.Printf("KDC: Warning: Failed to update KSK state: %v", err)
 									} else {
-										// Transition to active_dist state
-										if err := kdcDB.UpdateKeyState(req.ZoneName, activeKSK.ID, KeyStateActiveDist); err != nil {
-											log.Printf("KDC: Warning: Failed to update KSK state: %v", err)
-										} else {
-											// Encrypt KSK for all nodes
-											kskEncryptedCount := 0
-											for _, node := range nodes {
-												if node.NotifyAddress == "" {
-													continue
-												}
-												_, _, _, err := kdcDB.EncryptKeyForNode(activeKSK, node, kdcConf, kskDistributionID)
-												if err != nil {
-													log.Printf("KDC: Warning: Failed to encrypt KSK for node %s: %v", node.ID, err)
-													continue
-												}
-												kskEncryptedCount++
+										// Encrypt KSK for all nodes
+										kskEncryptedCount := 0
+										for _, node := range nodes {
+											if node.NotifyAddress == "" {
+												continue
 											}
-											log.Printf("KDC: Encrypted KSK %s for %d/%d nodes serving zone %s (distribution ID: %s)", activeKSK.ID, kskEncryptedCount, len(nodes), req.ZoneName, kskDistributionID)
+											_, _, _, err := kdcDB.EncryptKeyForNode(activeKSK, node, kdcConf, distributionID)
+											if err != nil {
+												log.Printf("KDC: Warning: Failed to encrypt KSK for node %s: %v", node.ID, err)
+												continue
+											}
+											kskEncryptedCount++
 										}
+										log.Printf("KDC: Encrypted KSK %s for %d/%d nodes serving zone %s (distribution ID: %s)", activeKSK.ID, kskEncryptedCount, len(nodes), req.ZoneName, distributionID)
 									}
 								}
 							}

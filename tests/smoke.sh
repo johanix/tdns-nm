@@ -187,15 +187,16 @@ grep -q "added successfully" "$W/out/zone-add" && res zone-add PASS || res zone-
 
 # Keys: generate a ZSK and set it to standby through the API (the CLI
 # setstate is a step of its own below)
-newkey() { # step -> echoes the key id
-	run "$1" $KCLI zone dnssec generate --zone z1.test. --type ZSK --algorithm 15
+newkey() { # step [zone] [type] -> echoes the key id
+	run "$1" $KCLI zone dnssec generate --zone "${2:-z1.test.}" --type "${3:-ZSK}" --algorithm 15
 	sed -n 's/^Key \([0-9]*\) generated successfully.*/\1/p' "$W/out/$1"
 }
-standby() {
+setstate() { # zone keyid state
 	curl -sk -X POST -H 'X-API-Key: smoke-kdc-api-key' -H 'Content-Type: application/json' \
-		-d "{\"command\":\"setstate\",\"zone_name\":\"z1.test.\",\"key_id\":\"$1\",\"new_state\":\"standby\"}" \
+		-d "{\"command\":\"setstate\",\"zone_name\":\"$1\",\"key_id\":\"$2\",\"new_state\":\"$3\"}" \
 		"https://$KDCAPI/api/v1/kdc/zone"
 }
+standby() { setstate z1.test. "$1" standby; }
 KID=$(newkey keygen1)
 [ -n "$KID" ] && res dnssec-generate "PASS (key $KID)" || res dnssec-generate "FAIL $(lastline keygen1)"
 standby "$KID" > "$W/out/standby1"
@@ -214,6 +215,22 @@ KID2=$(newkey keygen2)
 standby "$KID2" > "$W/out/standby2"
 run distrib-multi $KCLI distrib multi z1.test.
 waitfor "$KRSLOG" "Successfully stored ZSK (key_id $KID2)" 10 && res distrib-multi PASS || res distrib-multi "FAIL $(lastline distrib-multi)"
+
+# edgesign_full: distrib single sends the zone's active KSK along with the ZSK
+run svc-full $KCLI service add --sid full --name Full
+run svc-full-comp $KCLI service component add --sname full --cname sign_edge_full
+run node-full-comp $KCLI node component add --nodeid node1.test. --cid sign_edge_full
+run zone-full $KCLI zone add --zone z2.test. --sid full
+KSK=$(newkey keygen-ksk z2.test. KSK)
+setstate z2.test. "$KSK" active > "$W/out/ksk-active"
+ZSK2=$(newkey keygen-zsk2 z2.test. ZSK)
+setstate z2.test. "$ZSK2" standby > "$W/out/zsk2-standby"
+run distrib-full $KCLI distrib single --zone z2.test. --keyid "$ZSK2"
+if waitfor "$KRSLOG" "Successfully stored ZSK (key_id $ZSK2)" 10 && waitfor "$KRSLOG" "Successfully stored KSK (key_id $KSK)" 10; then
+	res distrib-single-full PASS
+else
+	res distrib-single-full "FAIL ZSK $ZSK2 / KSK $KSK not both stored"
+fi
 
 run delete-key $KCLI zone delete-key --zone z1.test. --keyid "$KID" --reason smoke
 waitfor "$KRSLOG" "Successfully deleted key $KID" 10 && res delete-key PASS || res delete-key "FAIL $(lastline delete-key)"
