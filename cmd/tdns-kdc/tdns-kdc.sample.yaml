@@ -13,8 +13,8 @@ apiserver:
    certfile:            /etc/tdns/certs/localhost.crt
    keyfile:             /etc/tdns/certs/localhost.key
 
-# DNS engine configuration for handling KMREQ and KMCTRL queries
-dnsengine:
+# DNS listeners for handling KMREQ and KMCTRL queries
+listeners:
    addresses:           [ 127.0.0.1:5354, '[::1]:5354' ]  # Addresses to listen on for DNS queries
    transports:          [ do53 ]  # Transport protocols: do53, dot, doh, doq
    certfile:            /etc/tdns/certs/localhost.crt  # Required for dot, doh, doq
@@ -95,15 +95,10 @@ kdc:
    # configurable via YAML. Set programmatically if needed.
    # manifest_json_format: true   # JSON format (default)
 
-   # KDC HPKE private key (X25519, 32 bytes)
-   # Required for enrollment and key distribution. HPKE-only deployments are supported.
-   # Generate with: kdc-cli keys generate --hpke --hpke-outfile <path>
-   kdc_hpke_priv_key: /etc/tdns/kdc/kdc.hpke.privatekey
-
    # KDC JOSE private key (P-256 ECDSA)
-   # Optional: Only required if you need JOSE-capable enrollments or clients.
-   # HPKE is required for core enrollment; JOSE is optional and only needed for JOSE-capable enrollments.
-   # Generate with: kdc-cli keys generate --jose --jose-outfile <path>
+   # Required: used for enrollment and for signing and encrypting distributions.
+   # JOSE uses P-256 for both encryption (ECDH-ES) and signing (ECDSA).
+   # Generate with: kdc-cli keys generate --jose-outfile <path>
    kdc_jose_priv_key: /etc/tdns/kdc/kdc.jose.privatekey
 
 log:

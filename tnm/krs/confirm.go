@@ -9,7 +9,6 @@ package krs
 import (
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/johanix/tdns/v2/core"
@@ -25,12 +24,7 @@ import (
 // failedKeys: List of keys that failed to install
 func SendConfirmationToKDC(distributionID, controlZone, kdcAddress string, successfulKeys, failedKeys []edns0.KeyStatusEntry) error {
 	// Construct NOTIFY QNAME: <distributionID>.<controlzone>
-	// Ensure controlZone is FQDN
-	controlZoneFQDN := controlZone
-	if !strings.HasSuffix(controlZoneFQDN, ".") {
-		controlZoneFQDN += "."
-	}
-	notifyQname := distributionID + "." + controlZoneFQDN
+	notifyQname := core.BuildNotifyQNAME(distributionID, controlZone)
 
 	// Send NOTIFY for CHUNK query type
 	notifyType := uint16(core.TypeCHUNK) // Use CHUNK RRtype (65015)
@@ -95,12 +89,7 @@ func SendConfirmationToKDC(distributionID, controlZone, kdcAddress string, succe
 // failedComponents: List of components that failed to install
 func SendComponentConfirmationToKDC(distributionID, controlZone, kdcAddress string, successfulComponents, failedComponents []edns0.ComponentStatusEntry) error {
 	// Construct NOTIFY QNAME: <distributionID>.<controlzone>
-	// Ensure controlZone is FQDN
-	controlZoneFQDN := controlZone
-	if !strings.HasSuffix(controlZoneFQDN, ".") {
-		controlZoneFQDN += "."
-	}
-	notifyQname := distributionID + "." + controlZoneFQDN
+	notifyQname := core.BuildNotifyQNAME(distributionID, controlZone)
 
 	// Send NOTIFY for CHUNK query type
 	notifyType := uint16(core.TypeCHUNK) // Use CHUNK RRtype (65015)

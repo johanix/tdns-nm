@@ -42,7 +42,7 @@ type KdcZonePost struct {
 	NewState      string   `json:"new_state,omitempty"`      // For setstate: target state
 	Zones         []string `json:"zones,omitempty"`          // For distrib-multi: list of zone names
 	Force         bool     `json:"force,omitempty"`          // For purge-keys: also delete distributed keys
-	Crypto        string   `json:"crypto,omitempty"`         // For distrib-multi and ping: force crypto backend ("hpke" or "jose")
+	Crypto        string   `json:"crypto,omitempty"`         // For distrib-multi and ping: force crypto backend ("jose")
 }
 
 // DistributionResult represents the result of distributing a key for a zone
@@ -612,8 +612,8 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 											log.Printf("KDC: Skipping node %s (no notify_address configured)", node.ID)
 											continue
 										}
-										// Encrypt key for this node (creates distribution record)
-										_, _, _, err := kdcDB.EncryptKeyForNode(key, node, kdcConf)
+										// Encrypt key for this node under the announced distribution ID (creates distribution record)
+										_, _, _, err := kdcDB.EncryptKeyForNode(key, node, kdcConf, distributionID)
 										if err != nil {
 											log.Printf("KDC: Warning: Failed to encrypt key for node %s: %v", node.ID, err)
 											continue
@@ -624,31 +624,27 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 									log.Printf("KDC: Encrypted key for %d/%d nodes serving zone %s", encryptedCount, len(nodes), req.ZoneName)
 								}
 
-								// Distribute active KSK for edgesign_full zones
+								// Distribute active KSK for edgesign_full zones, in the same
+								// distribution as the ZSK: that is the id the NOTIFY below names
 								if activeKSK != nil {
-									kskDistributionID, err := kdcDB.GetOrCreateDistributionID(req.ZoneName, activeKSK)
-									if err != nil {
-										log.Printf("KDC: Warning: Failed to get/create distribution ID for KSK %s: %v", activeKSK.ID, err)
+									// Transition to active_dist state
+									if err := kdcDB.UpdateKeyState(req.ZoneName, activeKSK.ID, KeyStateActiveDist); err != nil {
+										log.Printf("KDC: Warning: Failed to update KSK state: %v", err)
 									} else {
-										// Transition to active_dist state
-										if err := kdcDB.UpdateKeyState(req.ZoneName, activeKSK.ID, KeyStateActiveDist); err != nil {
-											log.Printf("KDC: Warning: Failed to update KSK state: %v", err)
-										} else {
-											// Encrypt KSK for all nodes
-											kskEncryptedCount := 0
-											for _, node := range nodes {
-												if node.NotifyAddress == "" {
-													continue
-												}
-												_, _, _, err := kdcDB.EncryptKeyForNode(activeKSK, node, kdcConf)
-												if err != nil {
-													log.Printf("KDC: Warning: Failed to encrypt KSK for node %s: %v", node.ID, err)
-													continue
-												}
-												kskEncryptedCount++
+										// Encrypt KSK for all nodes
+										kskEncryptedCount := 0
+										for _, node := range nodes {
+											if node.NotifyAddress == "" {
+												continue
 											}
-											log.Printf("KDC: Encrypted KSK %s for %d/%d nodes serving zone %s (distribution ID: %s)", activeKSK.ID, kskEncryptedCount, len(nodes), req.ZoneName, kskDistributionID)
+											_, _, _, err := kdcDB.EncryptKeyForNode(activeKSK, node, kdcConf, distributionID)
+											if err != nil {
+												log.Printf("KDC: Warning: Failed to encrypt KSK for node %s: %v", node.ID, err)
+												continue
+											}
+											kskEncryptedCount++
 										}
+										log.Printf("KDC: Encrypted KSK %s for %d/%d nodes serving zone %s (distribution ID: %s)", activeKSK.ID, kskEncryptedCount, len(nodes), req.ZoneName, distributionID)
 									}
 								}
 							}
@@ -1056,8 +1052,8 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 
 			// Validate crypto backend before any state changes
 			forcedCrypto := req.Crypto
-			if forcedCrypto != "" && forcedCrypto != "hpke" && forcedCrypto != "jose" {
-				sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid crypto backend: %s (must be 'hpke' or 'jose')", forcedCrypto))
+			if forcedCrypto != "" && forcedCrypto != "jose" {
+				sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid crypto backend: %s (must be 'jose')", forcedCrypto))
 				return
 			}
 
@@ -1195,14 +1191,9 @@ func APIKdcNode(kdcDB *KdcDB) http.HandlerFunc {
 				sendJSONError(w, http.StatusBadRequest, "node.id is required")
 				return
 			}
-			// Allow nil LongTermPubKey for JOSE-only nodes
-			if len(req.Node.LongTermHpkePubKey) != 0 && len(req.Node.LongTermHpkePubKey) != 32 {
-				sendJSONError(w, http.StatusBadRequest, "node.long_term_hpke_pub_key must be 32 bytes (X25519) or nil for JOSE-only nodes")
-				return
-			}
-			// Require at least one public key (HPKE or JOSE)
-			if len(req.Node.LongTermHpkePubKey) == 0 && len(req.Node.LongTermJosePubKey) == 0 {
-				sendJSONError(w, http.StatusBadRequest, "node must include either a 32-byte long_term_hpke_pub_key or a JOSE public key")
+			// Require the node's JOSE public key
+			if len(req.Node.LongTermJosePubKey) == 0 {
+				sendJSONError(w, http.StatusBadRequest, "node must include a JOSE public key (long_term_jose_pub_key)")
 				return
 			}
 			if req.Node.State == "" {
@@ -1299,7 +1290,7 @@ type KdcEnrollmentPost struct {
 	TokenValue       string `json:"token_value,omitempty"`       // For mark-used command
 	ExpirationWindow string `json:"expiration_window,omitempty"` // For activate command (e.g., "5m", "1h")
 	Comment          string `json:"comment,omitempty"`           // For generate command
-	Crypto           string `json:"crypto,omitempty"`            // For generate command: "hpke" or "jose" to include only that backend's public key
+	Crypto           string `json:"crypto,omitempty"`            // For generate command: crypto backend ("jose")
 	DeleteFiles      bool   `json:"delete_files,omitempty"`      // For purge command
 }
 
@@ -1378,14 +1369,14 @@ func APIKdcEnrollment(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 				resp.ErrorMsg = fmt.Sprintf("Enrollment token already exists for node %s (status: %s)", req.NodeID, status)
 			} else {
 				// Validate crypto backend before generating token to avoid orphaned tokens
-				// Get crypto backend from request (optional, defaults to both if empty)
+				// Get crypto backend from request (optional, defaults to JOSE if empty)
 				cryptoBackend := ""
 				if req.Crypto != "" {
 					cryptoBackend = req.Crypto
 					// Validate crypto backend if specified
-					if cryptoBackend != "hpke" && cryptoBackend != "jose" {
+					if cryptoBackend != "jose" {
 						resp.Error = true
-						resp.ErrorMsg = fmt.Sprintf("invalid crypto backend: %s (must be 'hpke' or 'jose')", cryptoBackend)
+						resp.ErrorMsg = fmt.Sprintf("invalid crypto backend: %s (must be 'jose')", cryptoBackend)
 					}
 				}
 
@@ -1866,8 +1857,8 @@ func APIKdcOperations(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 			forcedCrypto := ""
 			if crypto, ok := req["crypto"].(string); ok && crypto != "" {
 				// Validate crypto backend at API boundary
-				if crypto != "hpke" && crypto != "jose" {
-					sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid crypto backend: %s (must be 'hpke' or 'jose')", crypto))
+				if crypto != "jose" {
+					sendJSONError(w, http.StatusBadRequest, fmt.Sprintf("invalid crypto backend: %s (must be 'jose')", crypto))
 					return
 				}
 				forcedCrypto = crypto
@@ -2993,7 +2984,7 @@ func APIKdcCatalog(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 
 				log.Printf("KDC API: Generating catalog zone: %s", catalogZoneName)
 				// Get DnsEngine addresses from tdns.Conf (for API compatibility, though not used for NS records)
-				dnsEngineAddresses := tdns.Conf.DnsEngine.Addresses
+				dnsEngineAddresses := tdns.Conf.Listeners.Addresses
 				// Call kdc.GenerateCatalogZone (KDC-specific function in tnm/kdc/catalog.go)
 				zd, err := kdcDB.GenerateCatalogZone(catalogZoneName, dnsEngineAddresses)
 				if err != nil {

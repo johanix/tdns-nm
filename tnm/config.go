@@ -21,11 +21,9 @@ type KdcConf struct {
 	RetireTime                 time.Duration `yaml:"retire_time" mapstructure:"retire_time"`                                   // Time to wait before retired -> removed
 	DistributionTTL            time.Duration `yaml:"distribution_ttl" mapstructure:"distribution_ttl"`                         // TTL for distributions (default: 5 minutes, like TSIG)
 	ChunkMaxSize               int           `yaml:"chunk_max_size" mapstructure:"chunk_max_size"`                             // Maximum RDATA size per CHUNK (bytes, default: 60000)
-	KdcHpkePrivKey             string        `yaml:"kdc_hpke_priv_key" mapstructure:"kdc_hpke_priv_key"`                       // Path to KDC HPKE private key file
 	KdcEnrollmentAddress       string        `yaml:"kdc_enrollment_address" mapstructure:"kdc_enrollment_address"`             // IP:port where KDC accepts enrollment requests
 	EnrollmentExpirationWindow time.Duration `yaml:"enrollment_expiration_window" mapstructure:"enrollment_expiration_window"` // Expiration window after activation (default: 5 minutes)
 	CatalogZone                string        `yaml:"catalog_zone" mapstructure:"catalog_zone"`                                 // Catalog zone name (e.g., "catalog.example.com.")
-	UseCryptoV2                bool          `yaml:"use_crypto_v2" mapstructure:"use_crypto_v2"`                               // Feature flag: use crypto abstraction layer (v2) instead of direct HPKE (v1), default: false
 	KdcJosePrivKey             string        `yaml:"kdc_jose_priv_key" mapstructure:"kdc_jose_priv_key"`                       // Path to KDC JOSE private key file (P-256)
 }
 
@@ -35,8 +33,7 @@ type KrsConf struct {
 	Node            NodeConf        `yaml:"node" mapstructure:"node"`
 	ControlZone     string          `yaml:"control_zone" mapstructure:"control_zone"`         // DNS zone for distribution events
 	DnsEngine       DnsEngineConf   `yaml:"dnsengine" mapstructure:"dnsengine"`               // DNS engine config for NOTIFY
-	UseCryptoV2     bool            `yaml:"use_crypto_v2" mapstructure:"use_crypto_v2"`       // Feature flag: use crypto abstraction layer (v2) instead of direct HPKE (v1), default: false
-	SupportedCrypto []string        `yaml:"supported_crypto" mapstructure:"supported_crypto"` // List of supported crypto backends (e.g., ["hpke", "jose"])
+	SupportedCrypto []string        `yaml:"supported_crypto" mapstructure:"supported_crypto"` // List of supported crypto backends (e.g., ["jose"])
 }
 
 // DatabaseConf represents database configuration for KDC
@@ -53,10 +50,8 @@ type KrsDatabaseConf struct {
 // NodeConf represents the edge node's identity and connection info
 type NodeConf struct {
 	ID                  string `yaml:"id" mapstructure:"id" validate:"required"`                                 // Node ID (must match KDC)
-	LongTermHpkePrivKey string `yaml:"long_term_hpke_priv_key,omitempty" mapstructure:"long_term_hpke_priv_key"` // Path to HPKE long-term private key file (required if HPKE is supported)
 	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key,omitempty" mapstructure:"long_term_jose_priv_key"` // Path to JOSE long-term private key file (P-256)
 	KdcAddress          string `yaml:"kdc_address" mapstructure:"kdc_address" validate:"required"`               // KDC server address (IP:port)
-	KdcHpkePubKey       string `yaml:"kdc_hpke_pubkey,omitempty" mapstructure:"kdc_hpke_pubkey"`                 // Path to KDC HPKE public key file (hex encoded, for future communications)
 	KdcJosePubKey       string `yaml:"kdc_jose_pubkey,omitempty" mapstructure:"kdc_jose_pubkey"`                 // Path to KDC JOSE public key file (JWK JSON, for future communications)
 }
 
@@ -88,16 +83,4 @@ func (conf *KdcConf) GetEnrollmentExpirationWindow() time.Duration {
 		return 5 * time.Minute // Default: 5 minutes
 	}
 	return conf.EnrollmentExpirationWindow
-}
-
-// ShouldUseCryptoV2 returns whether to use crypto abstraction layer (v2) or direct HPKE (v1)
-// Default is false (use v1) for backward compatibility
-func (conf *KdcConf) ShouldUseCryptoV2() bool {
-	return conf.UseCryptoV2
-}
-
-// ShouldUseCryptoV2 returns whether to use crypto abstraction layer (v2) or direct HPKE (v1)
-// Default is false (use v1) for backward compatibility
-func (conf *KrsConf) ShouldUseCryptoV2() bool {
-	return conf.UseCryptoV2
 }

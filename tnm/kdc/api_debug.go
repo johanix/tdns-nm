@@ -15,6 +15,7 @@ import (
 	"time"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
+	"github.com/johanix/tdns-transport/v2/distrib"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 )
@@ -118,7 +119,7 @@ func APIKdcDebug(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 						}
 						// Get chunk count from first CHUNK (manifest)
 						if len(prepared.chunks) > 0 && prepared.chunks[0].Sequence == 0 {
-							manifestData, err := tnm.ExtractManifestData(prepared.chunks[0])
+							manifestData, err := distrib.ExtractManifestData(prepared.chunks[0])
 							if err == nil {
 								resp.ChunkCount = manifestData.ChunkCount
 								log.Printf("KDC Debug: Created test distribution %s with %d chunks", req.DistributionID, manifestData.ChunkCount)

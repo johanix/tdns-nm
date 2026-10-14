@@ -16,12 +16,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// ParseKdcConfigFromFile reads the config file and extracts the KDC configuration section,
-// storing it as YAML bytes in conf.Internal.KdcConf
-func ParseKdcConfigFromFile(conf *tdns.Config) error {
+// ParseKdcConfigFromFile reads the config file and returns its KDC configuration section.
+func ParseKdcConfigFromFile(conf *tdns.Config) (*KdcConf, error) {
 	cfgfile := conf.Internal.CfgFile
 	if cfgfile == "" {
-		return fmt.Errorf("no config file specified")
+		return nil, fmt.Errorf("no config file specified")
 	}
 
 	// Read the config file
@@ -30,51 +29,51 @@ func ParseKdcConfigFromFile(conf *tdns.Config) error {
 	}
 	data, err := os.ReadFile(cfgfile)
 	if err != nil {
-		return fmt.Errorf("error reading config file %s: %v", cfgfile, err)
+		return nil, fmt.Errorf("error reading config file %s: %v", cfgfile, err)
 	}
 
 	// Parse YAML into a map
 	var configMap map[string]interface{}
 	if err := yaml.Unmarshal(data, &configMap); err != nil {
-		return fmt.Errorf("error parsing YAML: %v", err)
+		return nil, fmt.Errorf("error parsing YAML: %v", err)
 	}
 
 	// Handle includes if present (similar to tdns processConfigFile)
 	configMap, err = processIncludes(configMap, filepath.Dir(cfgfile), 0)
 	if err != nil {
-		return fmt.Errorf("error processing includes: %v", err)
+		return nil, fmt.Errorf("error processing includes: %v", err)
 	}
 
 	// Extract the kdc section
 	kdcSection, ok := configMap["kdc"].(map[string]interface{})
 	if !ok {
-		return fmt.Errorf("KDC configuration section 'kdc' not found or invalid")
+		return nil, fmt.Errorf("KDC configuration section 'kdc' not found or invalid")
 	}
 
-	// Marshal the kdc section to YAML bytes
-	// We'll unmarshal it into tnm.KdcConf in startKdc() to avoid circular import
+	// Round-trip the kdc section through YAML into the typed config
 	kdcYAML, err := yaml.Marshal(kdcSection)
 	if err != nil {
-		return fmt.Errorf("failed to marshal KDC config: %v", err)
+		return nil, fmt.Errorf("failed to marshal KDC config: %v", err)
 	}
-
-	// Store YAML bytes - will be unmarshaled in startKdc()
-	conf.Internal.KdcConf = kdcYAML
+	var kdcConf KdcConf
+	if err := yaml.Unmarshal(kdcYAML, &kdcConf); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal KDC config: %v", err)
+	}
 
 	if tdns.Globals.Debug {
-		log.Printf("KDC config section found and stored (will be unmarshaled in startKdc)")
+		log.Printf("KDC config section found and parsed")
 	}
 
-	return nil
+	return &kdcConf, nil
 }
 
-// ParseKrsConfigFromFile reads the config file and extracts the KRS configuration section,
-// storing it as YAML bytes in conf.Internal.KrsConf
-// Note: dnsengine config is at top level (like KDC), but we merge it into krs section
-func ParseKrsConfigFromFile(conf *tdns.Config) error {
+// ParseKrsConfigFromFile reads the config file and returns its KRS configuration section.
+// Note: the listeners config is at top level (like KDC), but we merge it into the krs
+// section as its dnsengine
+func ParseKrsConfigFromFile(conf *tdns.Config) (*KrsConf, error) {
 	cfgfile := conf.Internal.CfgFile
 	if cfgfile == "" {
-		return fmt.Errorf("no config file specified")
+		return nil, fmt.Errorf("no config file specified")
 	}
 
 	// Read the config file
@@ -83,47 +82,47 @@ func ParseKrsConfigFromFile(conf *tdns.Config) error {
 	}
 	data, err := os.ReadFile(cfgfile)
 	if err != nil {
-		return fmt.Errorf("error reading config file %s: %v", cfgfile, err)
+		return nil, fmt.Errorf("error reading config file %s: %v", cfgfile, err)
 	}
 
 	// Parse YAML into a map
 	var configMap map[string]interface{}
 	if err := yaml.Unmarshal(data, &configMap); err != nil {
-		return fmt.Errorf("error parsing YAML: %v", err)
+		return nil, fmt.Errorf("error parsing YAML: %v", err)
 	}
 
 	// Handle includes if present (similar to tdns processConfigFile)
 	configMap, err = processIncludes(configMap, filepath.Dir(cfgfile), 0)
 	if err != nil {
-		return fmt.Errorf("error processing includes: %v", err)
+		return nil, fmt.Errorf("error processing includes: %v", err)
 	}
 
 	// Extract the krs section
 	krsSection, ok := configMap["krs"].(map[string]interface{})
 	if !ok {
-		return fmt.Errorf("KRS configuration section 'krs' not found or invalid")
+		return nil, fmt.Errorf("KRS configuration section 'krs' not found or invalid")
 	}
 
-	// Extract dnsengine from top level and merge into krs section
-	if dnsEngineSection, ok := configMap["dnsengine"].(map[string]interface{}); ok {
+	// Extract listeners from top level and merge into krs section as its dnsengine
+	if dnsEngineSection, ok := configMap["listeners"].(map[string]interface{}); ok {
 		krsSection["dnsengine"] = dnsEngineSection
 	}
 
-	// Marshal the krs section (now including dnsengine) to YAML bytes
-	// We'll unmarshal it into tnm.KrsConf in startKrs() to avoid circular import
+	// Round-trip the krs section (now including dnsengine) through YAML into the typed config
 	krsYAML, err := yaml.Marshal(krsSection)
 	if err != nil {
-		return fmt.Errorf("failed to marshal KRS config: %v", err)
+		return nil, fmt.Errorf("failed to marshal KRS config: %v", err)
 	}
-
-	// Store YAML bytes - will be unmarshaled in startKrs()
-	conf.Internal.KrsConf = krsYAML
+	var krsConf KrsConf
+	if err := yaml.Unmarshal(krsYAML, &krsConf); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal KRS config: %v", err)
+	}
 
 	if tdns.Globals.Debug {
-		log.Printf("KRS config section found and stored (will be unmarshaled in startKrs)")
+		log.Printf("KRS config section found and parsed")
 	}
 
-	return nil
+	return &krsConf, nil
 }
 
 // processIncludes handles include directives in the config file

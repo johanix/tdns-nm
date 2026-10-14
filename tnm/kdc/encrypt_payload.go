@@ -21,12 +21,12 @@ import (
 // Parameters:
 //   - node: The target node (must have appropriate public keys configured)
 //   - plaintext: The unencrypted payload to encrypt (operation-agnostic)
-//   - forcedCrypto: Optional backend to force ("hpke" or "jose"); empty string auto-selects
+//   - forcedCrypto: Optional backend to force (e.g. "jose"); empty string auto-selects
 //
 // Returns:
 //   - ciphertext: The encrypted payload
-//   - ephemeralPub: Ephemeral public key (32 bytes for HPKE, empty for JOSE)
-//   - backendName: The backend actually used ("hpke" or "jose")
+//   - ephemeralPub: Ephemeral public key (empty for JOSE, where it is in the JWE header)
+//   - backendName: The backend actually used (e.g. "jose")
 //   - error: Any error during encryption
 func EncryptPayloadForNode(node *Node, plaintext []byte, forcedCrypto string) (ciphertext []byte, ephemeralPub []byte, backendName string, err error) {
 	if node == nil {
@@ -34,7 +34,10 @@ func EncryptPayloadForNode(node *Node, plaintext []byte, forcedCrypto string) (c
 	}
 
 	// Select crypto backend based on node capabilities and forced preference
-	backendName = selectBackendForNode(node, forcedCrypto)
+	backendName, err = selectBackendForNode(node, forcedCrypto)
+	if err != nil {
+		return nil, nil, "", err
+	}
 
 	// Extract node's public key based on selected backend
 	var nodePubKeyData []byte
@@ -44,14 +47,7 @@ func EncryptPayloadForNode(node *Node, plaintext []byte, forcedCrypto string) (c
 		}
 		nodePubKeyData = node.LongTermJosePubKey
 	} else {
-		// Defensive check: refuse HPKE operations for JOSE-only nodes
-		if len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
-			return nil, nil, "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use %s", node.ID, backendName)
-		}
-		if len(node.LongTermHpkePubKey) == 0 {
-			return nil, nil, "", fmt.Errorf("node %s does not have a public key stored (required for %s backend)", node.ID, backendName)
-		}
-		nodePubKeyData = node.LongTermHpkePubKey
+		return nil, nil, "", fmt.Errorf("unsupported crypto backend: %s", backendName)
 	}
 
 	// Use shared encryption function

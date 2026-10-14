@@ -19,8 +19,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// validateCryptoBackend validates that a crypto backend string is either empty, "hpke", or "jose"
-// Normalizes input to lowercase for better UX (e.g., "HPKE" -> "hpke")
+// validateCryptoBackend validates that a crypto backend string is either empty or "jose"
+// Normalizes input to lowercase for better UX (e.g., "JOSE" -> "jose")
 // Returns the normalized value and an error if the value is invalid, or nil error if valid
 func validateCryptoBackend(crypto string) (string, error) {
 	if crypto == "" {
@@ -28,8 +28,8 @@ func validateCryptoBackend(crypto string) (string, error) {
 	}
 	// Normalize to lowercase for better UX
 	normalized := strings.ToLower(crypto)
-	if normalized != "hpke" && normalized != "jose" {
-		return "", fmt.Errorf("--crypto must be either 'hpke' or 'jose' (got: %s)", crypto)
+	if normalized != "jose" {
+		return "", fmt.Errorf("--crypto must be 'jose' (got: %s)", crypto)
 	}
 	return normalized, nil
 }

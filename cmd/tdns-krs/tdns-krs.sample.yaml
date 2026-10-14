@@ -16,9 +16,9 @@ apiserver:
    certfile:		/etc/tdns/certs/localhost.crt
    keyfile:		/etc/tdns/certs/localhost.key
 
-# DNS engine configuration for handling NOTIFY messages
+# DNS listeners for handling NOTIFY messages
 # Note: This is at top level but gets merged into the krs section during parsing
-dnsengine:
+listeners:
    addresses:		[ 127.0.0.1:5355, '[::1]:5355' ]  # Addresses to listen on for DNS NOTIFY
    transports:		[ do53 ]  # Transport protocols: do53, dot, doh, doq
    certfile:		/etc/tdns/certs/localhost.crt  # Required for dot, doh, doq
@@ -31,19 +31,22 @@ krs:
    node:
       # Node ID must be a Fully Qualified Domain Name (FQDN) with trailing dot
       # This ID must match exactly the node ID registered in the KDC
-      # Example: "cpt.axfr.net." or "node1.example.com."
-      id:			cpt.axfr.net.  # Must match node ID in KDC (FQDN with trailing dot)
-      long_term_priv_key:	/etc/tdns/krs/cpt.axfr.net.privatekey  # Path to HPKE long-term private key file
+      # Example: "node1.example.com."
+      id:				node1.example.com.  # Must match node ID in KDC (FQDN with trailing dot)
+
+      # Long-term private key for decryption (required)
+      long_term_jose_priv_key:	/etc/tdns/krs/node1.example.com.jose.privatekey  # JOSE (P-256) private key
+
+      # KDC public key for signature verification (required: every distribution is verified with it)
+      # An absolute path: a leading ~ is not expanded
+      kdc_jose_pubkey:		/etc/tdns/krs/kdc.jose.pubkey  # KDC JOSE public key (JWK)
+
       kdc_address:		127.0.0.1:5354  # KDC server address (IP:port)
    
-   control_zone:		kdc.example.com.  # Control zone for KMCTRL records
-   
-   # use_chunk: If true, use CHUNK format instead of MANIFEST+OLDCHUNK
-   # CHUNK is a unified RR type that combines manifest and chunk functionality
-   # into a single record type. When enabled, KRS will query for CHUNK records
-   # (sequence 0 for manifest, 1+ for data chunks) instead of separate MANIFEST
-   # and OLDCHUNK records.
-   # Default: false (uses MANIFEST+OLDCHUNK format)
-   # Set to true to use the new CHUNK format
-   use_chunk:		false  # Set to true to use CHUNK format
+   control_zone:		kdc.example.com.  # Control zone for distribution events
+
+   # supported_crypto: List of crypto backends this node supports
+   # The only backend is "jose" (P-256 + ECDH-ES); it is also the default.
+   # During enrollment, this list is sent to the KDC so it knows which backend to use.
+   supported_crypto:	[ "jose" ]
 

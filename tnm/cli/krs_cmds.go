@@ -7,20 +7,16 @@ package cli
 
 import (
 	"bytes"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/johanix/tdns-nm/tnm/krs"
 	"github.com/johanix/tdns/v2"
-	"github.com/johanix/tdns/v2/hpke"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
@@ -131,7 +127,7 @@ sending an enrollment UPDATE to the KDC, and creating the KRS configuration file
 
 This command:
 1. Parses the enrollment blob file
-2. Generates HPKE and/or JOSE keypairs (based on KDC capabilities and --crypto flag)
+2. Generates a JOSE keypair
 3. Generates SIG(0) keypair
 4. Creates and sends an encrypted enrollment UPDATE to the KDC
 5. Processes the enrollment confirmation
@@ -143,9 +139,8 @@ The --notify-address flag is required and specifies the IP:port address where th
 should send NOTIFY messages. This should match the address where the KRS DNS engine
 will listen (typically the same as the DNS engine address in the generated config).
 
-The --crypto flag is optional and can be used to restrict enrollment to a specific
-crypto backend ('hpke' or 'jose'). If not specified, both backends will be used if
-available in the enrollment blob.
+The --crypto flag is optional; the only crypto backend is 'jose', which is also the
+default.
 
 Optional flags:
   --api-address: API server address (default: 127.0.0.1:8990)
@@ -699,173 +694,6 @@ var krsDebugDistribFetchCmd = &cobra.Command{
 	},
 }
 
-var KrsDebugHpkeCmd = &cobra.Command{
-	Use:   "hpke",
-	Short: "HPKE (Hybrid Public Key Encryption) utilities",
-	Long:  `Commands for generating HPKE keypairs and decrypting encrypted DNSSEC keys.`,
-}
-
-var krsDebugHpkeGenerateCmd = &cobra.Command{
-	Use:   "generate [prefix]",
-	Short: "Generate an HPKE keypair for this edge node",
-	Long:  `Generates an HPKE keypair and writes the public key to {prefix}.publickey and private key to {prefix}.privatekey (both hex encoded). This is used to generate the node's long-term HPKE keypair for receiving encrypted DNSSEC keys from the KDC.`,
-	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		prefix := args[0]
-		pubKeyFile := prefix + ".publickey"
-		privKeyFile := prefix + ".privatekey"
-
-		// Generate HPKE keypair
-		pubKey, privKey, err := hpke.GenerateKeyPair()
-		if err != nil {
-			log.Fatalf("Error generating HPKE keypair: %v", err)
-		}
-
-		// Format keys as hex
-		pubKeyHex := fmt.Sprintf("%x", pubKey)
-		privKeyHex := fmt.Sprintf("%x", privKey)
-
-		// Create public key file with comments
-		pubKeyContent := fmt.Sprintf(`# HPKE Public Key (X25519)
-# Generated: %s
-# Algorithm: X25519 (HPKE KEM)
-# Key Size: 32 bytes (256 bits)
-# Format: Hexadecimal
-# 
-# This is the public key for HPKE (Hybrid Public Key Encryption).
-# Share this public key with the KDC so it can encrypt DNSSEC keys for this node.
-# The corresponding private key must be kept secret and secure.
-#
-%s
-`, time.Now().Format(time.RFC3339), pubKeyHex)
-
-		// Create private key file with comments
-		privKeyContent := fmt.Sprintf(`# HPKE Private Key (X25519)
-# Generated: %s
-# Algorithm: X25519 (HPKE KEM)
-# Key Size: 32 bytes (256 bits)
-# Format: Hexadecimal
-# 
-# WARNING: This is a PRIVATE KEY. Keep it secret and secure!
-# Do not share this key with anyone. Anyone with access to this key can decrypt
-# data encrypted with the corresponding public key.
-# This key is used by KRS to decrypt DNSSEC keys received from the KDC.
-#
-%s
-`, time.Now().Format(time.RFC3339), privKeyHex)
-
-		// Write public key file (readable by owner and group, not others)
-		if err := os.WriteFile(pubKeyFile, []byte(pubKeyContent), 0644); err != nil {
-			log.Fatalf("Error writing public key to file: %v", err)
-		}
-
-		// Write private key file (readable only by owner)
-		if err := os.WriteFile(privKeyFile, []byte(privKeyContent), 0600); err != nil {
-			log.Fatalf("Error writing private key to file: %v", err)
-		}
-
-		fmt.Printf("HPKE keypair generated successfully:\n")
-		fmt.Printf("  Public key:  %s\n", pubKeyFile)
-		fmt.Printf("  Private key: %s\n", privKeyFile)
-		fmt.Printf("\nTo register this node with the KDC, use:\n")
-		fmt.Printf("  kdc-cli node add --nodeid <node-id> --nodename <node-name> --pubkeyfile %s\n", pubKeyFile)
-		fmt.Printf("\nThe private key (%s) must be configured in the KRS configuration\n", privKeyFile)
-		fmt.Printf("so that KRS can decrypt DNSSEC keys received from the KDC.\n")
-	},
-}
-
-var krsDebugHpkeDecryptCmd = &cobra.Command{
-	Use:   "decrypt --encrypted-file <file> --private-key-file <file>",
-	Short: "Test HPKE decryption of an encrypted DNSSEC key",
-	Long:  `Decrypts an HPKE-encrypted DNSSEC key file using this node's private key. This is a test/debug command to verify decryption works correctly.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		encryptedFile := cmd.Flag("encrypted-file").Value.String()
-		privateKeyFile := cmd.Flag("private-key-file").Value.String()
-
-		if encryptedFile == "" {
-			log.Fatalf("Error: --encrypted-file is required")
-		}
-		if privateKeyFile == "" {
-			log.Fatalf("Error: --private-key-file is required")
-		}
-
-		// Read encrypted key file
-		encryptedData, err := os.ReadFile(encryptedFile)
-		if err != nil {
-			log.Fatalf("Error reading encrypted file: %v", err)
-		}
-
-		// Parse the encrypted file (it has comments and base64 data)
-		lines := strings.Split(string(encryptedData), "\n")
-		var encryptedKeyBase64 string
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			if strings.Contains(line, "Encrypted key (base64):") {
-				// The base64 data should be on the next line
-				continue
-			} else if len(line) > 50 {
-				// Likely the base64 encrypted key
-				encryptedKeyBase64 = line
-			}
-		}
-
-		if encryptedKeyBase64 == "" {
-			log.Fatalf("Error: could not find encrypted key in file")
-		}
-
-		// Decode base64 encrypted key
-		encryptedKey, err := base64.StdEncoding.DecodeString(encryptedKeyBase64)
-		if err != nil {
-			log.Fatalf("Error decoding base64 encrypted key: %v", err)
-		}
-
-		// Read private key file
-		privateKeyData, err := os.ReadFile(privateKeyFile)
-		if err != nil {
-			log.Fatalf("Error reading private key file: %v", err)
-		}
-
-		// Parse private key (skip comments, decode hex)
-		privKeyLines := strings.Split(string(privateKeyData), "\n")
-		var privKeyHex string
-		for _, line := range privKeyLines {
-			line = strings.TrimSpace(line)
-			if line != "" && !strings.HasPrefix(line, "#") {
-				privKeyHex += line
-			}
-		}
-
-		if privKeyHex == "" {
-			log.Fatalf("Error: could not find private key in file")
-		}
-
-		// Decode hex private key
-		privateKey, err := hex.DecodeString(privKeyHex)
-		if err != nil {
-			log.Fatalf("Error decoding hex private key: %v", err)
-		}
-
-		if len(privateKey) != 32 {
-			log.Fatalf("Error: private key must be 32 bytes (got %d)", len(privateKey))
-		}
-
-		// Decrypt using HPKE
-		// Note: HPKE Base mode extracts ephemeral key from ciphertext, so we don't need ephemeralPubKeyHex
-		plaintext, err := hpke.Decrypt(privateKey, nil, encryptedKey)
-		if err != nil {
-			log.Fatalf("Error decrypting: %v", err)
-		}
-
-		fmt.Printf("Decryption successful!\n")
-		fmt.Printf("Decrypted key size: %d bytes\n", len(plaintext))
-		fmt.Printf("\nDecrypted private key (PEM format):\n")
-		fmt.Printf("%s\n", string(plaintext))
-	},
-}
-
 // sendKrsRequest sends a JSON POST request to the KRS API
 func sendKrsRequest(api *tdns.ApiClient, endpoint string, data interface{}) (map[string]interface{}, error) {
 	var result map[string]interface{}
@@ -917,8 +745,7 @@ func init() {
 	KrsConfigCmd.AddCommand(krsConfigGetCmd)
 	KrsQueryCmd.AddCommand(krsQueryKmreqCmd)
 	KrsDebugDistribCmd.AddCommand(krsDebugDistribFetchCmd)
-	KrsDebugHpkeCmd.AddCommand(krsDebugHpkeGenerateCmd, krsDebugHpkeDecryptCmd)
-	KrsDebugCmd.AddCommand(KrsDebugDistribCmd, KrsDebugHpkeCmd)
+	KrsDebugCmd.AddCommand(KrsDebugDistribCmd)
 	KrsComponentsCmd.AddCommand(krsComponentsListCmd)
 	// Commands are added directly to root in main.go, not via KrsCmd
 
@@ -940,18 +767,13 @@ func init() {
 	krsDebugDistribFetchCmd.Flags().String("id", "", "Distribution ID")
 	krsDebugDistribFetchCmd.MarkFlagRequired("id")
 
-	krsDebugHpkeDecryptCmd.Flags().StringP("encrypted-file", "e", "", "File containing encrypted key")
-	krsDebugHpkeDecryptCmd.Flags().StringP("private-key-file", "p", "", "File containing node's HPKE private key (hex)")
-	krsDebugHpkeDecryptCmd.MarkFlagRequired("encrypted-file")
-	krsDebugHpkeDecryptCmd.MarkFlagRequired("private-key-file")
-
 	// Enrollment command flags
 	KrsEnrollCmd.Flags().String("package", "", "Path to enrollment blob file (required)")
 	KrsEnrollCmd.MarkFlagRequired("package")
 	KrsEnrollCmd.Flags().String("configdir", "/etc/tdns", "Config directory")
 	KrsEnrollCmd.Flags().String("notify-address", "", "Notify address (IP:port) where KDC should send NOTIFY messages (required)")
 	KrsEnrollCmd.MarkFlagRequired("notify-address")
-	KrsEnrollCmd.Flags().String("crypto", "", "Crypto backend to use: 'hpke' or 'jose' (optional, defaults to both if available)")
+	KrsEnrollCmd.Flags().String("crypto", "", "Crypto backend to use: 'jose' (optional, the default)")
 	KrsEnrollCmd.Flags().String("api-address", "127.0.0.1:8990", "API server address (IP:port)")
 	KrsEnrollCmd.Flags().String("db-path", "/var/lib/tdns/krs.db", "Database file path")
 	KrsEnrollCmd.Flags().String("log-file", "/var/log/tdns/tdns-krs.log", "Log file path")

@@ -7,7 +7,6 @@ package cli
 
 import (
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -18,6 +17,8 @@ import (
 	"time"
 
 	"github.com/johanix/tdns-nm/tnm/kdc"
+	"github.com/johanix/tdns-transport/v2/crypto"
+	_ "github.com/johanix/tdns-transport/v2/crypto/jose" // Auto-register JOSE backend
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
@@ -43,7 +44,7 @@ var KdcNodeEnrollCmd = &cobra.Command{
 var kdcNodeAddCmd = &cobra.Command{
 	Use:   "add --node <node-id> --name <node-name> --pubkey <pubkey-file>",
 	Short: "Add a new edge node to KDC",
-	Long:  `Add a new edge node. pubkey-file should contain the HPKE public key (32 bytes, hex or base64 encoded)`,
+	Long:  `Add a new edge node. pubkey-file should contain the node's JOSE public key (JWK JSON; lines starting with # are ignored)`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Note: nodeid, nodename, pubkeyfile are persistent flags (global variables)
 		// We validate them here since PrepArgs doesn't handle persistent flags yet
@@ -77,27 +78,15 @@ var kdcNodeAddCmd = &cobra.Command{
 				keyLines = append(keyLines, line)
 			}
 		}
-		pubkeyStr := strings.Join(keyLines, "")
+		pubkey := []byte(strings.Join(keyLines, "\n"))
 
-		// Decode hex or base64 (try hex first, then base64)
-		var pubkey []byte
-
-		// Try hex decoding first (64 hex chars = 32 bytes)
-		if len(pubkeyStr) == 64 {
-			pubkey, err = hex.DecodeString(pubkeyStr)
-			if err != nil {
-				log.Fatalf("Error decoding hex public key: %v", err)
-			}
-		} else {
-			// Try base64
-			pubkey, err = base64.StdEncoding.DecodeString(pubkeyStr)
-			if err != nil {
-				log.Fatalf("Error decoding base64 public key: %v", err)
-			}
+		// Validate the JWK with the JOSE backend before sending it
+		joseBackend, err := crypto.GetBackend("jose")
+		if err != nil {
+			log.Fatalf("Error getting JOSE backend: %v", err)
 		}
-
-		if len(pubkey) != 32 {
-			log.Fatalf("Public key must be 32 bytes (X25519), got %d bytes", len(pubkey))
+		if _, err := joseBackend.ParsePublicKey(pubkey); err != nil {
+			log.Fatalf("Error: public key file does not contain a valid JOSE public key (JWK): %v", err)
 		}
 
 		// Normalize node ID to FQDN
@@ -108,7 +97,8 @@ var kdcNodeAddCmd = &cobra.Command{
 			"node": map[string]interface{}{
 				"id":                     nodeIDFQDN,
 				"name":                   nodename,
-				"long_term_hpke_pub_key": pubkey,
+				"long_term_jose_pub_key": pubkey,
+				"supported_crypto":       []string{"jose"},
 				"state":                  "online",
 				"comment":                "",
 			},
@@ -287,9 +277,9 @@ var kdcNodeUpdateCmd = &cobra.Command{
 			updateNode["notify_address"] = addr
 		}
 
-		// Preserve long_term_hpke_pub_key (required field)
+		// Preserve long_term_jose_pub_key (required field)
 		// JSON encodes []byte as base64 string, so we need to decode it back to []byte
-		if pubkeyVal, ok := nodeMap["long_term_hpke_pub_key"]; ok {
+		if pubkeyVal, ok := nodeMap["long_term_jose_pub_key"]; ok {
 			var pubkeyBytes []byte
 			if pubkeyStr, ok := pubkeyVal.(string); ok {
 				// Decode base64 string back to []byte
@@ -300,9 +290,14 @@ var kdcNodeUpdateCmd = &cobra.Command{
 			} else {
 				log.Fatalf("Error: public key has unexpected type: %T", pubkeyVal)
 			}
-			updateNode["long_term_hpke_pub_key"] = pubkeyBytes
+			updateNode["long_term_jose_pub_key"] = pubkeyBytes
 		} else {
 			log.Fatalf("Error: public key not found in node data")
+		}
+
+		// Preserve supported_crypto
+		if sc, ok := nodeMap["supported_crypto"]; ok {
+			updateNode["supported_crypto"] = sc
 		}
 
 		// Preserve state
@@ -595,7 +590,7 @@ var kdcNodeEnrollGenerateCmd = &cobra.Command{
 	Use:   "generate --nodeid <nodeid> --outdir <directory> [--comment <comment>]",
 	Short: "Generate an enrollment token and blob file",
 	Long: `Generate an enrollment token for a node and create an enrollment blob file.
-The enrollment blob contains the token, node ID, KDC HPKE public key, enrollment address, and control zone.
+The enrollment blob contains the token, node ID, KDC JOSE public key, enrollment address, and control zone.
 The blob is base64-encoded JSON written to {nodeid}.enroll file in the specified output directory.
 The output directory must exist.`,
 	Run: func(cmd *cobra.Command, args []string) {
@@ -1052,7 +1047,7 @@ func init() {
 	kdcNodeEnrollGenerateCmd.Flags().String("outdir", "", "Output directory (must exist)")
 	kdcNodeEnrollGenerateCmd.MarkFlagRequired("outdir")
 	kdcNodeEnrollGenerateCmd.Flags().String("comment", "", "Optional comment")
-	kdcNodeEnrollGenerateCmd.Flags().String("crypto", "", "Crypto backend to use (hpke or jose). If not specified, both are included.")
+	kdcNodeEnrollGenerateCmd.Flags().String("crypto", "", "Crypto backend to use (jose, the default).")
 
 	kdcNodeEnrollActivateCmd.Flags().String("nodeid", "", "Node ID")
 	kdcNodeEnrollActivateCmd.MarkFlagRequired("nodeid")
@@ -1065,5 +1060,5 @@ func init() {
 
 	kdcNodePingCmd.Flags().String("nodeid", "", "Node ID to ping")
 	kdcNodePingCmd.Flags().Bool("all", false, "Ping all active nodes")
-	kdcNodePingCmd.Flags().String("crypto", "", "Force crypto backend (hpke or jose). If not specified, uses any backend the node supports.")
+	kdcNodePingCmd.Flags().String("crypto", "", "Force crypto backend (jose). If not specified, uses any backend the node supports.")
 }

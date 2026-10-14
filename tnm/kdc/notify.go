@@ -9,7 +9,6 @@ package kdc
 import (
 	"fmt"
 	"log"
-	"strings"
 
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -48,12 +47,7 @@ func (kdc *KdcDB) SendNotifyWithDistributionID(distributionID, controlZone strin
 	}
 
 	// Construct NOTIFY QNAME: <distributionID>.<controlzone>
-	// Ensure controlZone is FQDN
-	controlZoneFQDN := controlZone
-	if !strings.HasSuffix(controlZoneFQDN, ".") {
-		controlZoneFQDN += "."
-	}
-	notifyQname := distributionID + "." + controlZoneFQDN
+	notifyQname := core.BuildNotifyQNAME(distributionID, controlZone)
 
 	// Send NOTIFY for CHUNK query type
 	notifyType := uint16(core.TypeCHUNK) // Use CHUNK RRtype (65015)

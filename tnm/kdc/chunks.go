@@ -8,22 +8,20 @@ package kdc
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	tdns "github.com/johanix/tdns/v2"
+	nmdistrib "github.com/johanix/tdns-nm/tnm/distrib"
+	"github.com/johanix/tdns-transport/v2/crypto"
 	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/hpke"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
 )
@@ -42,371 +40,6 @@ type preparedChunks struct {
 
 var globalChunkCache = &chunkCache{
 	cache: make(map[string]*preparedChunks),
-}
-
-// validateHPKEForNode validates that a node can use HPKE operations
-// Checks that the node is not JOSE-only and has a valid HPKE public key
-func validateHPKEForNode(node *Node, nodeID, purpose string) error {
-	if len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
-		return fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE for %s", nodeID, purpose)
-	}
-	if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
-		return fmt.Errorf("node %s has invalid public key for %s: length %d (expected 32)", nodeID, purpose, len(node.LongTermHpkePubKey))
-	}
-	return nil
-}
-
-// prepareChunksForNodeV1 prepares chunks for a node's distribution event (V1 implementation using HPKE)
-// This is called on-demand when CHUNK is queried
-func (kdc *KdcDB) prepareChunksForNodeV1(nodeID, distributionID string, conf *tnm.KdcConf) (*preparedChunks, error) {
-	cacheKey := fmt.Sprintf("%s:%s", nodeID, distributionID)
-
-	// Check cache first
-	globalChunkCache.mu.RLock()
-	if cached, ok := globalChunkCache.cache[cacheKey]; ok {
-		globalChunkCache.mu.RUnlock()
-		log.Printf("KDC: Using cached chunks for node %s, distribution %s", nodeID, distributionID)
-		return cached, nil
-	}
-	globalChunkCache.mu.RUnlock()
-
-	// Not in cache, prepare chunks
-	log.Printf("KDC: Preparing chunks for node %s, distribution %s", nodeID, distributionID)
-
-	// Get the node to access its long-term public key for HMAC
-	node, err := kdc.GetNode(nodeID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get node %s: %v", nodeID, err)
-	}
-	// Validate HPKE eligibility once at the start (covers HMAC and encryption operations)
-	if err := validateHPKEForNode(node, nodeID, "HPKE operations"); err != nil {
-		return nil, err
-	}
-
-	// Get all distribution records for this distributionID
-	records, err := kdc.GetDistributionRecordsForDistributionID(distributionID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get distribution records: %v", err)
-	}
-
-	if len(records) == 0 {
-		return nil, fmt.Errorf("no distribution records found for distribution %s (may have been purged after completion)", distributionID)
-	}
-
-	// Filter to records for this node (or all nodes if nodeID is empty)
-	var nodeRecords []*DistributionRecord
-	for _, record := range records {
-		if record.NodeID == nodeID || record.NodeID == "" {
-			nodeRecords = append(nodeRecords, record)
-		}
-	}
-
-	if len(nodeRecords) == 0 {
-		log.Printf("KDC: Distribution %s exists but has no records for node %s (found %d records for other nodes)", distributionID, nodeID, len(records))
-		return nil, fmt.Errorf("no distribution records found for node %s, distribution %s (distribution exists but not for this node)", nodeID, distributionID)
-	}
-
-	// Determine content type by analyzing all operations in this distribution
-	// Categorize operations into domains and check for conflicts
-	hasNodeOps := false // update_components
-	hasKeyOps := false  // roll_key, delete_key
-	hasMgmtOps := false // ping
-
-	for _, record := range nodeRecords {
-		switch record.Operation {
-		case "update_components":
-			hasNodeOps = true
-		case "roll_key", "delete_key":
-			hasKeyOps = true
-		case "ping":
-			hasMgmtOps = true
-		}
-	}
-
-	// Determine contentType based on operation mix
-	contentType := "key_operations" // default
-	if hasNodeOps && !hasKeyOps && !hasMgmtOps {
-		contentType = "node_operations"
-	} else if !hasNodeOps && hasKeyOps && !hasMgmtOps {
-		contentType = "key_operations"
-	} else if !hasNodeOps && !hasKeyOps && hasMgmtOps {
-		contentType = "mgmt_operations"
-	} else if hasNodeOps || hasKeyOps || hasMgmtOps {
-		contentType = "mixed_operations"
-	}
-
-	log.Printf("KDC: Distribution %s contains: node_ops=%v, key_ops=%v, mgmt_ops=%v -> contentType=%s",
-		distributionID, hasNodeOps, hasKeyOps, hasMgmtOps, contentType)
-
-	var base64Data []byte
-	var zoneCount int
-	var keyCount int
-	var operationCount int
-
-	if contentType == "node_operations" {
-		// For node_operations (update_components) distributions, use the encrypted data directly from the distribution record
-		// The distribution record already contains the correct encrypted component list
-		// (created with the intended component list, not the current DB state)
-		if len(nodeRecords) != 1 {
-			return nil, fmt.Errorf("node_operations distribution should have exactly one record, got %d", len(nodeRecords))
-		}
-
-		record := nodeRecords[0]
-		if record.Operation != "update_components" {
-			return nil, fmt.Errorf("node_operations distribution has non-update_components operation: %s", record.Operation)
-		}
-
-		// The distribution record already contains the encrypted component list
-		// Format stored: <ephemeral_pub_key (32 bytes)><ciphertext>
-		// We just need to combine them and base64 encode
-		if len(record.EphemeralPubKey) != 32 {
-			return nil, fmt.Errorf("invalid ephemeral public key length: %d (expected 32)", len(record.EphemeralPubKey))
-		}
-
-		// Combine ephemeral public key and ciphertext for transport
-		// Format: <ephemeral_pub_key (32 bytes)><ciphertext>
-		encryptedData := append(record.EphemeralPubKey, record.EncryptedKey...)
-
-		// Base64 encode the encrypted data
-		base64Data = []byte(base64.StdEncoding.EncodeToString(encryptedData))
-
-		log.Printf("KDC: Using encrypted component list from distribution record: encrypted %d bytes -> base64 %d bytes",
-			len(encryptedData), len(base64Data))
-
-		zoneCount = 0 // node_operations doesn't have zones
-		keyCount = 0  // node_operations doesn't have keys
-	} else if contentType == "key_operations" || contentType == "mgmt_operations" || contentType == "mixed_operations" {
-		// Prepare JSON structure with operation-based distribution entries
-		// Supports key operations (roll_key, delete_key), management operations (ping), or mixed
-		// The entire JSON will be encrypted using HPKE
-		entries := make([]tnm.DistributionEntry, 0, len(nodeRecords))
-		zoneSet := make(map[string]bool)
-
-		for _, record := range nodeRecords {
-			entry := tnm.DistributionEntry{
-				Operation: record.Operation,
-				Metadata:  record.Payload,
-			}
-
-			switch record.Operation {
-			case string(OperationRollKey):
-				// Fetch key details from dnssec_keys table
-				key, err := kdc.GetDNSSECKeyByID(record.ZoneName, record.KeyID)
-				if err != nil {
-					log.Printf("KDC: Warning: Failed to get key %s for zone %s: %v", record.KeyID, record.ZoneName, err)
-					continue
-				}
-
-				// Populate entry with key details
-				entry.ZoneName = record.ZoneName
-				entry.KeyID = record.KeyID
-				entry.KeyType = string(key.KeyType)
-				entry.Algorithm = key.Algorithm
-				entry.Flags = key.Flags
-				entry.PublicKey = key.PublicKey
-				entry.PrivateKey = base64.StdEncoding.EncodeToString(key.PrivateKey)
-
-				zoneSet[record.ZoneName] = true
-
-			case string(OperationPing):
-				// Ping operation (management) - metadata already contains nonce and timestamp
-				// No additional fields needed
-
-			case string(OperationDeleteKey):
-				// Delete key operation - populate zone_name and key_id
-				entry.ZoneName = record.ZoneName
-				entry.KeyID = record.KeyID
-
-				zoneSet[record.ZoneName] = true
-
-			default:
-				log.Printf("KDC: Warning: Unknown operation type %q in distribution %s", record.Operation, distributionID)
-				continue
-			}
-
-			entries = append(entries, entry)
-		}
-
-		operationCount = len(entries)
-		keyCount = 0 // For key_operations, count the actual key operations
-		for _, entry := range entries {
-			if entry.Operation == "roll_key" || entry.Operation == "delete_key" {
-				keyCount++
-			}
-		}
-		zoneCount = len(zoneSet)
-
-		if operationCount == 0 {
-			return nil, fmt.Errorf("no valid operations found for node %s, distribution %s", nodeID, distributionID)
-		}
-
-		// Marshal to JSON (cleartext)
-		entriesJSON, err := json.Marshal(entries)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal entries JSON: %v", err)
-		}
-
-		// Debug logging: log cleartext content (masking private keys)
-		if tdns.Globals.Debug {
-			// Create a copy for logging with masked private keys
-			logEntries := make([]map[string]interface{}, len(entries))
-			for i, entry := range entries {
-				logEntry := map[string]interface{}{
-					"operation": entry.Operation,
-					"zone_name": entry.ZoneName,
-					"key_id":    entry.KeyID,
-				}
-				if entry.Operation == string(OperationRollKey) {
-					logEntry["key_type"] = entry.KeyType
-					logEntry["algorithm"] = entry.Algorithm
-					logEntry["flags"] = entry.Flags
-					logEntry["public_key"] = entry.PublicKey
-					logEntry["private_key"] = "***MASKED***"
-				}
-				if entry.Metadata != nil {
-					logEntry["metadata"] = entry.Metadata
-				}
-				logEntries[i] = logEntry
-			}
-			logJSON, _ := json.Marshal(logEntries)
-			log.Printf("KDC: DEBUG: Cleartext distribution payload (private keys masked): %s", string(logJSON))
-		}
-
-		log.Printf("KDC: Prepared %s: %d operations (%d key ops) for %d zones, JSON size: %d bytes",
-			contentType, operationCount, keyCount, zoneCount, len(entriesJSON))
-
-		// Encrypt the entire JSON payload using HPKE and encode for transport
-		base64Data, err = tnm.EncryptAndEncode(node.LongTermHpkePubKey, entriesJSON)
-		if err != nil {
-			return nil, fmt.Errorf("failed to encrypt distribution payload: %v", err)
-		}
-		log.Printf("KDC: Encrypted distribution payload: cleartext %d bytes -> base64 %d bytes",
-			len(entriesJSON), len(base64Data))
-	} else {
-		// Should never reach here - all valid content types should be handled above
-		return nil, fmt.Errorf("invalid or unsupported content type: %s for distribution %s", contentType, distributionID)
-	}
-
-	// Calculate checksum
-	hash := sha256.Sum256([]byte(base64Data))
-	checksum := fmt.Sprintf("sha256:%x", hash)
-
-	// Create manifest metadata
-	extraFields := make(map[string]interface{})
-	if contentType == "key_operations" || contentType == "mgmt_operations" || contentType == "mixed_operations" {
-		// For operation-based distributions, include operation counts
-		extraFields["zone_count"] = zoneCount
-		extraFields["key_count"] = keyCount
-		extraFields["operation_count"] = operationCount
-	} else if contentType == "node_operations" {
-		// For node_operations (update_components), get component count from the stored component list
-		// This ensures the metadata matches the actual payload (which comes from the distribution record)
-		_, intendedComponents, err := kdc.GetDistributionComponentList(distributionID)
-		if err == nil {
-			extraFields["component_count"] = len(intendedComponents)
-			log.Printf("KDC: Set component_count in metadata to %d (from stored distribution component list)", len(intendedComponents))
-		} else {
-			// Fallback: if we can't get the stored list, log a warning but don't fail
-			log.Printf("KDC: Warning: Failed to get component list for distribution %s to set metadata: %v", distributionID, err)
-			// Don't set component_count if we can't get the correct value
-		}
-	}
-	// Add retire_time from config if available
-	if conf != nil && conf.RetireTime > 0 {
-		extraFields["retire_time"] = conf.RetireTime.String() // Convert duration to string (e.g., "168h0m0s")
-	}
-	// Add distribution_ttl from config if available (for KRS validation)
-	if conf != nil && conf.GetDistributionTTL() > 0 {
-		extraFields["distribution_ttl"] = conf.GetDistributionTTL().String() // Convert duration to string (e.g., "5m0s")
-	}
-	metadata := tnm.CreateManifestMetadata(contentType, distributionID, nodeID, extraFields)
-
-	// Determine if payload should be included inline
-	payloadSize := len(base64Data)
-	testSize := tnm.EstimateManifestSize(metadata, base64Data)
-
-	// Check if the manifest fits in DNS message (accounting for headers and QNAME)
-	// Estimate: DNS headers (~12) + QNAME (~100) + RR header (~10) + manifest data
-	const estimatedDNSOverhead = 150
-	estimatedTotalSize := estimatedDNSOverhead + testSize
-	includeInline := tnm.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
-
-	var dataChunks []*core.CHUNK
-	var chunkCount uint16
-	var chunkSize uint16
-
-	if includeInline {
-		// Payload fits inline, include it directly in manifest
-		chunkCount = 0
-		chunkSize = 0
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest",
-			payloadSize, testSize, estimatedTotalSize)
-	} else {
-		// Payload is too large, split into chunks
-		chunkSizeInt := conf.GetChunkMaxSize()
-		dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
-		// Check if SplitIntoCHUNKs returned nil (indicates overflow)
-		if dataChunks == nil && len(base64Data) > 0 {
-			return nil, fmt.Errorf("failed to split payload into chunks: overflow detected (payload size: %d bytes, chunk size: %d bytes)", len(base64Data), chunkSizeInt)
-		}
-		// Check for integer overflow before converting to uint16
-		if len(dataChunks) > math.MaxUint16 {
-			return nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
-		}
-		if chunkSizeInt > math.MaxUint16 {
-			return nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
-		}
-		chunkCount = uint16(len(dataChunks))
-		chunkSize = uint16(chunkSizeInt)
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
-			payloadSize, testSize, estimatedTotalSize, chunkCount)
-	}
-
-	// Create manifest data
-	manifestData := &tnm.ManifestData{
-		ChunkCount: chunkCount,
-		ChunkSize:  chunkSize,
-		Metadata:   metadata,
-	}
-
-	// Include payload inline if it fits
-	if includeInline {
-		manifestData.Payload = make([]byte, len(base64Data))
-		copy(manifestData.Payload, base64Data)
-	}
-
-	// Create manifest CHUNK (Sequence=0, Total=chunkCount)
-	manifestCHUNK, err := tnm.CreateCHUNKManifest(manifestData, core.FormatJSON)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
-	}
-
-	// Calculate HMAC using the recipient node's long-term public key
-	// This ensures each distribution is authenticated for the specific recipient node
-	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermHpkePubKey); err != nil {
-		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
-	}
-	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifestCHUNK.HMAC))
-
-	// Create CHUNK records (manifest + data chunks)
-	allChunks := make([]*core.CHUNK, 0)
-	allChunks = append(allChunks, manifestCHUNK)
-	allChunks = append(allChunks, dataChunks...)
-
-	prepared := &preparedChunks{
-		chunks:    allChunks,
-		checksum:  checksum,
-		timestamp: 0, // TODO: add timestamp
-	}
-
-	// Cache it
-	globalChunkCache.mu.Lock()
-	globalChunkCache.cache[cacheKey] = prepared
-	globalChunkCache.mu.Unlock()
-
-	log.Printf("KDC: Prepared %d CHUNK records for node %s, distribution %s",
-		len(allChunks), nodeID, distributionID)
-	return prepared, nil
 }
 
 // GetCHUNKForNode retrieves a CHUNK record for a node's distribution event
@@ -507,7 +140,7 @@ func (kdc *KdcDB) GetDistributionRecordsForDistributionID(distributionID string)
 				record.Payload = payload
 			}
 		}
-		record.Status = hpke.DistributionStatus(statusStr)
+		record.Status = DistributionStatus(statusStr)
 		records = append(records, record)
 	}
 	return records, rows.Err()
@@ -655,116 +288,56 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 	// Not in cache, prepare chunks
 	log.Printf("KDC: Preparing %s chunks for node %s, distribution %s", contentType, nodeID, distributionID)
 
-	// Get the node to access its long-term public key for HMAC
+	// Get the node: its JOSE public key is the encryption key for encrypted_text
 	node, err := kdc.GetNode(nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node %s: %v", nodeID, err)
 	}
-	// Validate HPKE eligibility once at the start (covers encryption and HMAC operations)
-	if err := validateHPKEForNode(node, nodeID, "HPKE operations"); err != nil {
-		return nil, err
+
+	// Every distribution is signed by the KDC, a clear text one included
+	backend, err := crypto.GetBackend("jose")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get JOSE backend: %v", err)
+	}
+	joseKeys, err := GetKdcJoseKeypair(conf.KdcJosePrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load KDC JOSE signing key: %v", err)
 	}
 
 	var dataToChunk []byte
-	// var err error
 
 	if contentType == "encrypted_text" {
-		// Encrypt the text using HPKE and encode for transport
-		dataToChunk, err = tnm.EncryptAndEncode(node.LongTermHpkePubKey, []byte(text))
+		// Encrypt the text to the node and sign it with the KDC key: JWS(JWE(text))
+		nodePubKey, err := backend.ParsePublicKey(node.LongTermJosePubKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse node JOSE public key: %v", err)
+		}
+		dataToChunk, err = nmdistrib.EncryptSignAndEncode(backend, nodePubKey, []byte(text), joseKeys.PrivateKey, nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to encrypt text: %v", err)
 		}
-		log.Printf("KDC: Encrypted text (%d bytes) -> base64 (%d bytes)", len(text), len(dataToChunk))
+		log.Printf("KDC: Encrypted and signed text (%d bytes) -> base64 (%d bytes)", len(text), len(dataToChunk))
 	} else {
 		// clear_text: just base64 encode the text
 		dataToChunk = []byte(base64.StdEncoding.EncodeToString([]byte(text)))
 	}
 
-	// Calculate checksum
-	hash := sha256.Sum256(dataToChunk)
-	checksum := fmt.Sprintf("sha256:%x", hash)
-
-	// Determine if payload should be included inline
-	payloadSize := len(dataToChunk)
-	testMetadata := map[string]interface{}{
-		"content":         contentType,
-		"distribution_id": distributionID,
-		"node_id":         nodeID,
-		"text_length":     len(text),
+	claims := &nmdistrib.JWTManifestClaims{
+		Issuer:         "kdc",
+		Subject:        "distribution",
+		IssuedAt:       time.Now().Unix(),
+		DistributionID: distributionID,
+		ReceiverID:     nodeID,
+		Content:        contentType,
+		Crypto:         "jose",
 	}
-	testSize := tnm.EstimateManifestSize(testMetadata, dataToChunk)
-
-	// Check if the manifest fits in DNS message
-	const estimatedDNSOverhead = 150
-	estimatedTotalSize := estimatedDNSOverhead + testSize
-	includeInline := tnm.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
-
-	var dataChunks []*core.CHUNK
-	var chunkCount uint16
-	var chunkSize uint16
-
-	if includeInline {
-		// Payload fits inline, include it directly in manifest
-		chunkCount = 0
-		chunkSize = 0
-		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest",
-			payloadSize, testSize, estimatedTotalSize)
-	} else {
-		// Payload is too large, split into chunks
-		chunkSizeInt := conf.GetChunkMaxSize()
-		dataChunks = tnm.SplitIntoCHUNKs(dataToChunk, chunkSizeInt, core.FormatJSON)
-		// Check if SplitIntoCHUNKs returned nil (indicates overflow)
-		if dataChunks == nil && len(dataToChunk) > 0 {
-			return nil, fmt.Errorf("failed to split payload into chunks: overflow detected (payload size: %d bytes, chunk size: %d bytes)", len(dataToChunk), chunkSizeInt)
-		}
-		// Check for integer overflow before converting to uint16
-		if len(dataChunks) > math.MaxUint16 {
-			return nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
-		}
-		if chunkSizeInt > math.MaxUint16 {
-			return nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
-		}
-		chunkCount = uint16(len(dataChunks))
-		chunkSize = uint16(chunkSizeInt)
-		log.Printf("KDC: Test text payload size %d bytes, manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
-			payloadSize, testSize, estimatedTotalSize, chunkCount)
+	if conf.GetDistributionTTL() > 0 {
+		claims.DistributionTTL = conf.GetDistributionTTL().String()
 	}
-
-	// Create manifest data
-	extraFields := map[string]interface{}{
-		"text_length": len(text),
-	}
-	metadata := tnm.CreateManifestMetadata(contentType, distributionID, nodeID, extraFields)
-	manifestData := &tnm.ManifestData{
-		ChunkCount: chunkCount,
-		ChunkSize:  chunkSize,
-		Metadata:   metadata,
-	}
-
-	// Include payload inline if it fits
-	if includeInline {
-		manifestData.Payload = make([]byte, len(dataToChunk))
-		copy(manifestData.Payload, dataToChunk)
-	}
-
-	// Create manifest CHUNK (Sequence=0, Total=chunkCount)
-	manifestCHUNK, err := tnm.CreateCHUNKManifest(manifestData, core.FormatJSON)
+	allChunks, checksum, err := signedManifestChunks(dataToChunk, claims, joseKeys.PrivateKey, backend, conf)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
+		return nil, err
 	}
-
-	// Calculate HMAC using the recipient node's long-term public key
-	// This ensures each distribution is authenticated for the specific recipient node
-	// (HPKE eligibility already validated at function start)
-	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, node.LongTermHpkePubKey); err != nil {
-		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
-	}
-	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s public key (%d bytes)", nodeID, len(manifestCHUNK.HMAC))
-
-	// Create CHUNK records (manifest + data chunks)
-	allChunks := make([]*core.CHUNK, 0)
-	allChunks = append(allChunks, manifestCHUNK)
-	allChunks = append(allChunks, dataChunks...)
 
 	prepared := &preparedChunks{
 		chunks:    allChunks,
@@ -792,11 +365,11 @@ func (kdc *KdcDB) PrepareTextChunks(nodeID, distributionID, text string, content
 			ZoneName:        "_test_distribution_", // Placeholder zone for test distributions
 			KeyID:           "_test_key_",          // Placeholder key for test distributions
 			NodeID:          nodeID,
-			EncryptedKey:    []byte{},       // Empty for test distributions
-			EphemeralPubKey: []byte{},       // Empty for test distributions
+			EncryptedKey:    []byte{}, // Empty for test distributions
+			EphemeralPubKey: []byte{}, // Empty for test distributions
 			CreatedAt:       time.Now(),
 			ExpiresAt:       nil,
-			Status:          hpke.DistributionStatusPending,
+			Status:          DistributionStatusPending,
 			DistributionID:  distributionID,
 		}
 

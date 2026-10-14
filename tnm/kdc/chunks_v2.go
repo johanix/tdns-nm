@@ -9,8 +9,6 @@
 package kdc
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -18,11 +16,13 @@ import (
 	"log"
 	"math"
 	"strings"
+	"time"
 
-	"github.com/go-jose/go-jose/v4"
+	nmdistrib "github.com/johanix/tdns-nm/tnm/distrib"
+	"github.com/johanix/tdns-transport/v2/crypto"
+	"github.com/johanix/tdns-transport/v2/distrib"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/crypto"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
 )
@@ -30,14 +30,17 @@ import (
 // selectBackendForNode determines which crypto backend to use for a node
 // based on the node's SupportedCrypto field.
 // This is a convenience wrapper around tnm.SelectBackend that works with Node structs.
-// forcedCrypto: if provided ("hpke" or "jose"), forces that backend (if node supports it)
-// Returns the backend name (e.g., "hpke", "jose")
-func selectBackendForNode(node *Node, forcedCrypto string) string {
-	backendName := tnm.SelectBackend(node.SupportedCrypto, forcedCrypto)
+// forcedCrypto: if provided (e.g. "jose"), forces that backend (if node supports it)
+// Returns the backend name (e.g., "jose"), or an error when the node lists no available backend
+func selectBackendForNode(node *Node, forcedCrypto string) (string, error) {
+	backendName, err := tnm.SelectBackend(node.SupportedCrypto, forcedCrypto)
+	if err != nil {
+		return "", fmt.Errorf("node %s: %v", node.ID, err)
+	}
 	if forcedCrypto != "" && backendName != forcedCrypto {
 		log.Printf("KDC: Warning: Node %s does not support forced crypto backend %s, auto-selected %s instead", node.ID, forcedCrypto, backendName)
 	}
-	return backendName
+	return backendName, nil
 }
 
 // determineContentType analyzes distribution records to determine the content type
@@ -78,6 +81,9 @@ func determineContentType(records []*DistributionRecord) string {
 func (kdc *KdcDB) buildNodeOperationsPayload(
 	nodeRecords []*DistributionRecord,
 	distributionID string,
+	backend crypto.Backend,
+	backendName string,
+	signingKey crypto.PrivateKey,
 ) ([]byte, int, int, error) {
 	if len(nodeRecords) != 1 {
 		return nil, 0, 0, fmt.Errorf("node_operations distribution should have exactly one record, got %d", len(nodeRecords))
@@ -88,29 +94,39 @@ func (kdc *KdcDB) buildNodeOperationsPayload(
 		return nil, 0, 0, fmt.Errorf("node_operations distribution has non-update_components operation: %s", record.Operation)
 	}
 
-	// The distribution record contains encrypted component list
-	// For v2, this should already be encrypted with the correct backend
-	// DecodeAndDecrypt expects format: <ephemeral_pub_key(32)>+ciphertext
-	// Combine ephemeral pub key (if present) with encrypted key before encoding
-	var encryptedData []byte
-	if record.EphemeralPubKey != nil && len(record.EphemeralPubKey) > 0 {
-		encryptedData = make([]byte, 0, len(record.EphemeralPubKey)+len(record.EncryptedKey))
-		encryptedData = append(encryptedData, record.EphemeralPubKey...)
-		encryptedData = append(encryptedData, record.EncryptedKey...)
-	} else {
-		// No ephemeral pub key (JOSE backend doesn't use it)
-		encryptedData = record.EncryptedKey
-	}
-	base64Data := []byte(base64.StdEncoding.EncodeToString(encryptedData))
+	// The distribution record contains encrypted component list (JWE format)
+	// For V2, this is already encrypted as JWE compact serialization
+	jweData := record.EncryptedKey
 
-	log.Printf("KDC: Using encrypted component list from distribution record: %d bytes (ephemeral: %d + ciphertext: %d) -> base64 %d bytes",
-		len(encryptedData), len(record.EphemeralPubKey), len(record.EncryptedKey), len(base64Data))
+	log.Printf("KDC: Using encrypted component list from distribution record: %d bytes (JWE format)",
+		len(jweData))
+
+	if signingKey == nil {
+		return nil, 0, 0, fmt.Errorf("no KDC signing key: refusing to send an unsigned node_operations distribution")
+	}
+
+	// Sign the JWE to create JWS(JWE)
+	log.Printf("KDC: Using signed encryption (JWS(JWE)) for node_operations with %s backend", backendName)
+	jwsData, err := backend.Sign(signingKey, jweData)
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("failed to sign node_operations JWE: %v", err)
+	}
+
+	log.Printf("KDC: Signed node_operations JWE: JWE %d bytes -> JWS(JWE) %d bytes",
+		len(jweData), len(jwsData))
+
+	// Base64 encode JWS(JWE) for transport
+	base64Data := []byte(base64.StdEncoding.EncodeToString(jwsData))
+
+	log.Printf("KDC: Signed and encoded node_operations distribution: JWS(JWE) %d bytes -> base64 %d bytes",
+		len(jwsData), len(base64Data))
 
 	return base64Data, 0, 0, nil
 }
 
 // buildKeyOperationsPayload prepares the payload for key_operations, mgmt_operations, or mixed_operations.
-// It builds the JSON structure, encrypts it, and returns the base64-encoded ciphertext with metadata counts.
+// It builds the JSON structure, encrypts and signs it as JWS(JWE(...)), and returns the base64-encoded
+// result with metadata counts.
 func (kdc *KdcDB) buildKeyOperationsPayload(
 	nodeRecords []*DistributionRecord,
 	distributionID string,
@@ -118,6 +134,8 @@ func (kdc *KdcDB) buildKeyOperationsPayload(
 	backend crypto.Backend,
 	backendName string,
 	nodePubKey crypto.PublicKey,
+	signingKey crypto.PrivateKey,
+	encryptMetadata map[string]interface{},
 ) ([]byte, int, int, int, error) {
 	// Prepare JSON structure with operation-based distribution entries
 	entries := make([]tnm.DistributionEntry, 0, len(nodeRecords))
@@ -215,69 +233,50 @@ func (kdc *KdcDB) buildKeyOperationsPayload(
 	log.Printf("KDC: Prepared %d operations (%d key ops) for %d zones, JSON size: %d bytes",
 		operationCount, keyCount, zoneCount, len(entriesJSON))
 
-	// Encrypt the entire JSON payload using the selected backend
-	ciphertext, err := backend.Encrypt(nodePubKey, entriesJSON)
-	if err != nil {
-		return nil, 0, 0, 0, fmt.Errorf("failed to encrypt distribution payload with %s backend: %v", backendName, err)
+	if signingKey == nil {
+		return nil, 0, 0, 0, fmt.Errorf("no KDC signing key: refusing to send an unsigned distribution")
 	}
 
-	// Base64 encode for transport
-	base64Data := []byte(base64.StdEncoding.EncodeToString(ciphertext))
-	log.Printf("KDC: Encrypted distribution payload with %s: cleartext %d bytes -> ciphertext %d bytes -> base64 %d bytes",
-		backendName, len(entriesJSON), len(ciphertext), len(base64Data))
+	// Encrypt and sign the payload: JWS(JWE(payload)) gives confidentiality and authenticity
+	log.Printf("KDC: Using signed encryption (JWS(JWE)) with %s backend", backendName)
+	base64Data, err := nmdistrib.EncryptSignAndEncode(backend, nodePubKey, entriesJSON, signingKey, encryptMetadata)
+	if err != nil {
+		return nil, 0, 0, 0, fmt.Errorf("failed to encrypt and sign distribution payload with %s backend: %v", backendName, err)
+	}
+	log.Printf("KDC: Encrypted and signed distribution payload with %s: cleartext %d bytes -> JWS(JWE) %d bytes (base64)",
+		backendName, len(entriesJSON), len(base64Data))
 
 	return base64Data, zoneCount, keyCount, operationCount, nil
 }
 
-// buildManifestMetadata creates manifest metadata with extra fields based on content type.
-func buildManifestMetadata(
-	contentType string,
-	distributionID string,
-	nodeID string,
-	backendName string,
-	zoneCount int,
-	keyCount int,
-	operationCount int,
-	componentCount int,
-	conf *tnm.KdcConf,
-) map[string]interface{} {
-	extraFields := make(map[string]interface{})
-	if contentType == "key_operations" || contentType == "mgmt_operations" || contentType == "mixed_operations" {
-		extraFields["zone_count"] = zoneCount
-		extraFields["key_count"] = keyCount
-		extraFields["operation_count"] = operationCount
-	} else if contentType == "node_operations" {
-		extraFields["component_count"] = componentCount
-	}
-	// Add retire_time from config if available
-	if conf != nil && conf.RetireTime > 0 {
-		extraFields["retire_time"] = conf.RetireTime.String()
-	}
-	// Add distribution_ttl from config if available (for KRS validation)
-	if conf != nil && conf.GetDistributionTTL() > 0 {
-		extraFields["distribution_ttl"] = conf.GetDistributionTTL().String()
-	}
-	// Add crypto backend to metadata
-	extraFields["crypto"] = backendName
-
-	return tnm.CreateManifestMetadata(contentType, distributionID, nodeID, extraFields)
-}
-
 // splitIntoChunks determines if payload should be included inline or split into chunks,
 // and returns the chunk count, chunk size, and data chunks.
+//
+// Parameters:
+//   - base64Data: The payload data (already base64-encoded)
+//   - jwtClaims: JWT manifest claims, used to estimate the manifest size with the payload inline
+//   - conf: KDC configuration (provides max chunk size)
 func splitIntoChunks(
 	base64Data []byte,
-	metadata map[string]interface{},
+	jwtClaims *nmdistrib.JWTManifestClaims,
 	conf *tnm.KdcConf,
 ) (uint16, uint16, []*core.CHUNK, error) {
-	// Determine if payload should be included inline
-	payloadSize := len(base64Data)
-	testSize := tnm.EstimateManifestSize(metadata, base64Data)
+	// Get max chunk size from config (this is the inline threshold for TCP transport)
+	const defaultChunkSize = 60000
+	var maxSize int
+	if conf != nil {
+		maxSize = conf.GetChunkMaxSize()
+	} else {
+		maxSize = defaultChunkSize
+	}
 
-	// Check if the manifest fits in DNS message
-	const estimatedDNSOverhead = 150
-	estimatedTotalSize := estimatedDNSOverhead + testSize
-	includeInline := tnm.ShouldIncludePayloadInline(payloadSize, estimatedTotalSize)
+	// Estimate the JWT manifest size with the payload inline
+	testClaims := *jwtClaims
+	testClaims.Payload = base64.StdEncoding.EncodeToString(base64Data)
+	estimatedSize := nmdistrib.EstimateJWTManifestSize(&testClaims)
+
+	// Determine if payload should be included inline
+	includeInline := distrib.ShouldIncludePayloadInlineWithLimit(estimatedSize, maxSize)
 
 	var dataChunks []*core.CHUNK
 	var chunkCount uint16
@@ -286,18 +285,10 @@ func splitIntoChunks(
 	if includeInline {
 		chunkCount = 0
 		chunkSize = 0
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - including inline in CHUNK manifest",
-			payloadSize, testSize, estimatedTotalSize)
+		log.Printf("KDC: Payload %d bytes, estimated JWT manifest %d bytes (max %d) - including inline",
+			len(base64Data), estimatedSize, maxSize)
 	} else {
-		// Use default chunk size if conf is nil
-		const defaultChunkSize = 60000
-		var chunkSizeInt int
-		if conf != nil {
-			chunkSizeInt = conf.GetChunkMaxSize()
-		} else {
-			chunkSizeInt = defaultChunkSize
-		}
-		dataChunks = tnm.SplitIntoCHUNKs([]byte(base64Data), chunkSizeInt, core.FormatJSON)
+		dataChunks = distrib.SplitIntoCHUNKs(base64Data, maxSize, core.FormatJSON)
 		// Check if SplitIntoCHUNKs returned nil (overflow condition)
 		if dataChunks == nil {
 			return 0, 0, nil, fmt.Errorf("failed to split data into chunks (overflow or invalid chunk size)")
@@ -306,23 +297,79 @@ func splitIntoChunks(
 		if len(dataChunks) > math.MaxUint16 {
 			return 0, 0, nil, fmt.Errorf("too many chunks: %d (max: %d)", len(dataChunks), math.MaxUint16)
 		}
-		if chunkSizeInt > math.MaxUint16 {
-			return 0, 0, nil, fmt.Errorf("chunk size too large: %d (max: %d)", chunkSizeInt, math.MaxUint16)
+		if maxSize > math.MaxUint16 {
+			return 0, 0, nil, fmt.Errorf("chunk size too large: %d (max: %d)", maxSize, math.MaxUint16)
 		}
 		if len(dataChunks) == 0 {
 			return 0, 0, nil, fmt.Errorf("no chunks created from data (data may be empty)")
 		}
 		chunkCount = uint16(len(dataChunks))
-		chunkSize = uint16(chunkSizeInt)
-		log.Printf("KDC: Payload size %d bytes (base64), manifest size %d bytes, estimated total %d bytes - exceeds inline threshold, splitting into %d chunks",
-			payloadSize, testSize, estimatedTotalSize, chunkCount)
+		chunkSize = uint16(maxSize)
+		log.Printf("KDC: Payload %d bytes, estimated JWT manifest %d bytes (max %d) - splitting into %d chunks",
+			len(base64Data), estimatedSize, maxSize, chunkCount)
 	}
 
 	return chunkCount, chunkSize, dataChunks, nil
 }
 
+// signedManifestChunks returns the CHUNK records for a distribution payload: a
+// JWT manifest signed by the KDC, then the data chunks when the payload does
+// not fit inline. claims carries the distribution fields; the chunk fields,
+// the payload hash and an inline payload are filled in here. Also returns the
+// payload checksum.
+func signedManifestChunks(
+	base64Data []byte,
+	claims *nmdistrib.JWTManifestClaims,
+	signingKey crypto.PrivateKey,
+	backend crypto.Backend,
+	conf *tnm.KdcConf,
+) ([]*core.CHUNK, string, error) {
+	if signingKey == nil {
+		return nil, "", fmt.Errorf("no KDC signing key: refusing to send an unsigned manifest")
+	}
+
+	hash := sha256.Sum256(base64Data)
+	checksum := fmt.Sprintf("sha256:%x", hash)
+	claims.ChunkHash = checksum
+
+	chunkCount, chunkSize, dataChunks, err := splitIntoChunks(base64Data, claims, conf)
+	if err != nil {
+		return nil, "", err
+	}
+	claims.ChunkCount = chunkCount
+	claims.ChunkSize = chunkSize
+	if chunkCount == 0 {
+		claims.Payload = base64.StdEncoding.EncodeToString(base64Data)
+	}
+
+	manifestCHUNK, err := nmdistrib.CreateJWTManifest(claims, signingKey, backend)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to create JWT manifest: %v", err)
+	}
+
+	allChunks := []*core.CHUNK{manifestCHUNK}
+	if chunkCount > 0 {
+		if len(dataChunks) != int(chunkCount) {
+			return nil, "", fmt.Errorf("chunk count mismatch: expected %d data chunks but got %d", chunkCount, len(dataChunks))
+		}
+		// Validate chunk sequence numbers before appending
+		for i, chunk := range dataChunks {
+			if chunk.Sequence != uint16(i+1) {
+				return nil, "", fmt.Errorf("chunk sequence mismatch at index %d: got sequence=%d, expected %d",
+					i, chunk.Sequence, i+1)
+			}
+			if chunk.Total != chunkCount {
+				return nil, "", fmt.Errorf("chunk total mismatch at index %d: got total=%d, expected %d",
+					i, chunk.Total, chunkCount)
+			}
+		}
+		allChunks = append(allChunks, dataChunks...)
+	}
+	return allChunks, checksum, nil
+}
+
 // prepareChunksForNodeV2 prepares chunks for a node's distribution event
-// using the crypto abstraction layer to support both HPKE and JOSE.
+// using the crypto abstraction layer (JOSE).
 // This is called on-demand when CHUNK is queried.
 // The crypto backend is selected based on the node's SupportedCrypto field.
 //
@@ -330,8 +377,7 @@ func splitIntoChunks(
 //   - determineContentType() - analyzes operations to determine content type
 //   - buildNodeOperationsPayload() - handles node_operations
 //   - buildKeyOperationsPayload() - handles key_operations, mgmt_operations, mixed_operations
-//   - buildManifestMetadata() - creates manifest metadata with extra fields
-//   - splitIntoChunks() - handles CHUNK splitting logic
+//   - signedManifestChunks() - the signed JWT manifest and the data chunks
 func (kdc *KdcDB) prepareChunksForNodeV2(
 	nodeID, distributionID string,
 	conf *tnm.KdcConf,
@@ -398,7 +444,10 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	}
 
 	// Select crypto backend - use stored one if available, otherwise auto-select
-	backendName := selectBackendForNode(node, forcedCrypto)
+	backendName, err := selectBackendForNode(node, forcedCrypto)
+	if err != nil {
+		return nil, err
+	}
 	backend, err := crypto.GetBackend(backendName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get crypto backend %s: %v", backendName, err)
@@ -407,21 +456,8 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	log.Printf("KDC: Using %s backend for node %s", backendName, nodeID)
 
 	// Parse node's public key using the selected backend
-	// For JOSE, we use LongTermJosePubKey; for HPKE, we use LongTermPubKey
 	var nodePubKey crypto.PublicKey
-	if backendName == "hpke" {
-		// Defensive check: refuse HPKE operations for JOSE-only nodes
-		if len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
-			return nil, fmt.Errorf("node %s only supports JOSE crypto backend, cannot use HPKE", nodeID)
-		}
-		if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
-			return nil, fmt.Errorf("node %s has invalid HPKE public key length: %d (expected 32)", nodeID, len(node.LongTermHpkePubKey))
-		}
-		nodePubKey, err = backend.ParsePublicKey(node.LongTermHpkePubKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse node HPKE public key: %v", err)
-		}
-	} else if backendName == "jose" {
+	if backendName == "jose" {
 		if len(node.LongTermJosePubKey) == 0 {
 			return nil, fmt.Errorf("node %s does not have a JOSE public key stored (required for JOSE backend)", nodeID)
 		}
@@ -453,6 +489,20 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	contentType := determineContentType(nodeRecords)
 	log.Printf("KDC: Distribution %s -> contentType=%s", distributionID, contentType)
 
+	// Load KDC's signing key: every distribution is signed (JWS(JWE) payload, JWT manifest)
+	joseKeys, err := GetKdcJoseKeypair(conf.KdcJosePrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load KDC JOSE signing key, not sending distribution %s: %v", distributionID, err)
+	}
+	kdcSigningKey := joseKeys.PrivateKey
+
+	// Prepare encryption metadata for JWE protected headers
+	encryptMetadata := make(map[string]interface{})
+	encryptMetadata["distribution_id"] = distributionID
+	encryptMetadata["timestamp"] = time.Now().Format(time.RFC3339)
+	encryptMetadata["sender"] = "kdc"
+	encryptMetadata["content_type"] = contentType
+
 	var base64Data []byte
 	var zoneCount int
 	var keyCount int
@@ -460,7 +510,8 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 
 	if contentType == "node_operations" {
 		var err error
-		base64Data, zoneCount, keyCount, err = kdc.buildNodeOperationsPayload(nodeRecords, distributionID)
+		base64Data, zoneCount, keyCount, err = kdc.buildNodeOperationsPayload(
+			nodeRecords, distributionID, backend, backendName, kdcSigningKey)
 		if err != nil {
 			return nil, err
 		}
@@ -468,7 +519,7 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 	} else if contentType == "key_operations" || contentType == "mgmt_operations" || contentType == "mixed_operations" {
 		var err error
 		base64Data, zoneCount, keyCount, operationCount, err = kdc.buildKeyOperationsPayload(
-			nodeRecords, distributionID, nodeID, backend, backendName, nodePubKey)
+			nodeRecords, distributionID, nodeID, backend, backendName, nodePubKey, kdcSigningKey, encryptMetadata)
 		if err != nil {
 			return nil, err
 		}
@@ -478,126 +529,44 @@ func (kdc *KdcDB) prepareChunksForNodeV2(
 		return nil, fmt.Errorf("invalid or unsupported content type: %s for distribution %s", contentType, distributionID)
 	}
 
-	// Calculate checksum
-	hash := sha256.Sum256([]byte(base64Data))
-	checksum := fmt.Sprintf("sha256:%x", hash)
-
 	// Get component count for node_operations if needed
 	componentCount := 0
 	if contentType == "node_operations" {
 		_, intendedComponents, err := kdc.GetDistributionComponentList(distributionID)
 		if err == nil {
 			componentCount = len(intendedComponents)
-			log.Printf("KDC: Set component_count in metadata to %d (from stored distribution component list)", componentCount)
 		} else {
-			log.Printf("KDC: Warning: Failed to get component list for distribution %s to set metadata: %v", distributionID, err)
+			log.Printf("KDC: Warning: Failed to get component list for distribution %s: %v", distributionID, err)
 		}
 	}
+	log.Printf("KDC: Distribution %s: %d zones, %d keys, %d operations, %d components",
+		distributionID, zoneCount, keyCount, operationCount, componentCount)
 
-	// Create manifest metadata
-	metadata := buildManifestMetadata(
-		contentType, distributionID, nodeID, backendName,
-		zoneCount, keyCount, operationCount, componentCount, conf)
+	claims := &nmdistrib.JWTManifestClaims{
+		Issuer:         "kdc",
+		Subject:        "distribution",
+		IssuedAt:       time.Now().Unix(),
+		DistributionID: distributionID,
+		ReceiverID:     nodeID,
+		Content:        contentType,
+		Crypto:         backendName,
+		ZoneCount:      zoneCount,
+		KeyCount:       keyCount,
+		OperationCount: operationCount,
+	}
+	if conf != nil && conf.RetireTime > 0 {
+		claims.RetireTime = conf.RetireTime.String()
+	}
+	if conf != nil && conf.GetDistributionTTL() > 0 {
+		claims.DistributionTTL = conf.GetDistributionTTL().String()
+	}
 
-	// Split into chunks (or include inline)
-	chunkCount, chunkSize, dataChunks, err := splitIntoChunks(base64Data, metadata, conf)
+	allChunks, checksum, err := signedManifestChunks(base64Data, claims, kdcSigningKey, backend, conf)
 	if err != nil {
 		return nil, err
 	}
-
-	// Create manifest data
-	manifestData := &tnm.ManifestData{
-		ChunkCount: chunkCount,
-		ChunkSize:  chunkSize,
-		Metadata:   metadata,
-	}
-
-	// Include payload inline if chunkCount is 0 (indicates inline payload)
-	if chunkCount == 0 {
-		manifestData.Payload = make([]byte, len(base64Data))
-		copy(manifestData.Payload, base64Data)
-	}
-
-	// Create manifest CHUNK (Sequence=0, Total=chunkCount)
-	manifestCHUNK, err := tnm.CreateCHUNKManifest(manifestData, core.FormatJSON)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create CHUNK manifest: %v", err)
-	}
-
-	// Calculate HMAC using the recipient node's long-term public key
-	// Select the appropriate key based on the crypto backend used for encryption
-	var hmacKey []byte
-	if backendName == "hpke" {
-		// For HPKE, use the X25519 public key directly (32 bytes)
-		if node.LongTermHpkePubKey == nil || len(node.LongTermHpkePubKey) != 32 {
-			return nil, fmt.Errorf("node %s has invalid HPKE public key for HMAC: length %d (expected 32)", nodeID, len(node.LongTermHpkePubKey))
-		}
-		hmacKey = node.LongTermHpkePubKey
-	} else if backendName == "jose" {
-		// For JOSE, extract the x-coordinate from the ECDSA P-256 public key (32 bytes)
-		if len(node.LongTermJosePubKey) == 0 {
-			return nil, fmt.Errorf("node %s does not have a JOSE public key stored (required for HMAC)", nodeID)
-		}
-		// Parse JWK to extract ECDSA public key
-		var jwk jose.JSONWebKey
-		if err := json.Unmarshal(node.LongTermJosePubKey, &jwk); err != nil {
-			return nil, fmt.Errorf("failed to parse node JOSE public key for HMAC: %v", err)
-		}
-		ecdsaKey, ok := jwk.Key.(*ecdsa.PublicKey)
-		if !ok {
-			return nil, fmt.Errorf("node %s JOSE public key is not an ECDSA key (required for HMAC)", nodeID)
-		}
-		// Validate curve is P-256 (required for this backend)
-		if ecdsaKey.Curve != elliptic.P256() {
-			return nil, fmt.Errorf("node %s JOSE public key uses unsupported curve: %s (expected P-256)", nodeID, ecdsaKey.Curve.Params().Name)
-		}
-		// Extract x-coordinate (32 bytes for P-256)
-		xBytes := ecdsaKey.X.Bytes()
-		// Calculate expected coordinate length for P-256: (256 bits + 7) / 8 = 32 bytes
-		expectedLen := (ecdsaKey.Curve.Params().BitSize + 7) / 8
-		if len(xBytes) > expectedLen {
-			return nil, fmt.Errorf("node %s JOSE public key x-coordinate too large: %d bytes (max: %d for P-256)", nodeID, len(xBytes), expectedLen)
-		}
-		// Pad to expectedLen bytes if needed (ECDSA coordinates are variable length)
-		hmacKey = make([]byte, expectedLen)
-		copy(hmacKey[expectedLen-len(xBytes):], xBytes)
-	} else {
-		return nil, fmt.Errorf("unsupported crypto backend for HMAC: %s", backendName)
-	}
-	if err := tnm.CalculateCHUNKHMAC(manifestCHUNK, hmacKey); err != nil {
-		return nil, fmt.Errorf("failed to calculate HMAC: %v", err)
-	}
-	log.Printf("KDC: Calculated HMAC for CHUNK manifest using node %s %s public key (%d bytes)", nodeID, backendName, len(hmacKey))
-
-	// Create CHUNK records (manifest + data chunks)
-	allChunks := make([]*core.CHUNK, 0)
-	allChunks = append(allChunks, manifestCHUNK)
-	if chunkCount > 0 {
-		if dataChunks == nil || len(dataChunks) == 0 {
-			return nil, fmt.Errorf("expected %d data chunks but got %d", chunkCount, len(dataChunks))
-		}
-		if len(dataChunks) != int(chunkCount) {
-			return nil, fmt.Errorf("chunk count mismatch: expected %d data chunks but got %d", chunkCount, len(dataChunks))
-		}
-		// Validate chunk sequence numbers before appending
-		for i, chunk := range dataChunks {
-			if chunk.Sequence == 0 || chunk.Total == 0 {
-				return nil, fmt.Errorf("invalid chunk at index %d: sequence=%d, total=%d (expected sequence=%d, total=%d)",
-					i, chunk.Sequence, chunk.Total, i+1, chunkCount)
-			}
-			if chunk.Sequence != uint16(i+1) {
-				return nil, fmt.Errorf("chunk sequence mismatch at index %d: got sequence=%d, expected %d",
-					i, chunk.Sequence, i+1)
-			}
-			if chunk.Total != chunkCount {
-				return nil, fmt.Errorf("chunk total mismatch at index %d: got total=%d, expected %d",
-					i, chunk.Total, chunkCount)
-			}
-		}
-		allChunks = append(allChunks, dataChunks...)
-		log.Printf("KDC: Assembled %d chunks: manifest (index 0) + %d data chunks (indices 1-%d)",
-			len(allChunks), len(dataChunks), len(allChunks)-1)
-	}
+	log.Printf("KDC: Created JWT manifest with signature for node %s (format=JWT), %d data chunks",
+		nodeID, len(allChunks)-1)
 
 	prepared := &preparedChunks{
 		chunks:    allChunks,

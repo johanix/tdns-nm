@@ -8,8 +8,6 @@ package kdc
 
 import (
 	"time"
-
-	"github.com/johanix/tdns/v2/hpke"
 )
 
 // ZoneSigningMode represents how a zone is signed
@@ -94,9 +92,8 @@ const (
 type Node struct {
 	ID                 string     `json:"id"`                               // Unique identifier for the node
 	Name               string     `json:"name"`                             // Human-readable name
-	LongTermHpkePubKey []byte     `json:"long_term_hpke_pub_key"`           // HPKE long-term public key (32 bytes, X25519)
 	LongTermJosePubKey []byte     `json:"long_term_jose_pub_key,omitempty"` // JOSE long-term public key (JWK JSON bytes)
-	SupportedCrypto    []string   `json:"supported_crypto,omitempty"`       // List of supported crypto backends (e.g., ["hpke", "jose"])
+	SupportedCrypto    []string   `json:"supported_crypto,omitempty"`       // List of supported crypto backends (e.g., ["jose"])
 	Sig0PubKey         string     `json:"sig0_pub_key,omitempty"`           // SIG(0) public key (DNSKEY RR format string)
 	NotifyAddress      string     `json:"notify_address"`                   // Address:port for sending NOTIFY messages (e.g., "192.0.2.1:53")
 	RegisteredAt       time.Time  `json:"registered_at"`
@@ -182,20 +179,31 @@ type DNSSECKey struct {
 	Comment     string     `json:"comment"`                // Optional comment
 }
 
+// DistributionStatus is the lifecycle status of a distribution record.
+// Moved here from tdns-transport v2/hpke/types.go, which dropped it in
+// f32e048 (cleanup step 7); only the KDC uses it.
+type DistributionStatus string
+
+const (
+	DistributionStatusPending   DistributionStatus = "pending"
+	DistributionStatusDelivered DistributionStatus = "delivered"
+	DistributionStatusActive    DistributionStatus = "active"
+	DistributionStatusRevoked   DistributionStatus = "revoked"
+)
+
 // DistributionRecord represents a record of a key distribution to a node
 type DistributionRecord struct {
 	ID              string // Unique ID for this distribution
 	ZoneName        string // Zone name (NULL for non-key operations like ping, update_components)
 	KeyID           string // DNSSEC key ID (NULL for non-key operations)
 	NodeID          string // Target node ID (empty if to all nodes)
-	EncryptedKey    []byte // HPKE-encrypted private key (NULL for unencrypted operations like delete_key)
+	EncryptedKey    []byte // Encrypted private key (NULL for unencrypted operations like delete_key)
 	EphemeralPubKey []byte // Ephemeral public key used for encryption (NULL for unencrypted operations).
-	// For HPKE: 32-byte X25519 ephemeral public key (extracted from ciphertext).
 	// For JOSE: Empty (ephemeral key is embedded in JWE header within ciphertext).
 	CreatedAt      time.Time
 	ExpiresAt      *time.Time // Optional expiration of the distributed key
-	Status         hpke.DistributionStatus
-	DistributionID string                 // HPKE distribution ID (for tracking)
+	Status         DistributionStatus
+	DistributionID string                 // Distribution ID (for tracking)
 	CompletedAt    *time.Time             // When distribution was completed (nil if not completed)
 	Operation      string                 // Operation type: ping, roll_key, delete_key, node_components
 	Payload        map[string]interface{} `json:"payload,omitempty"` // Operation-specific metadata (JSON)

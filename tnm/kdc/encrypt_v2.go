@@ -1,9 +1,7 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * HPKE encryption functions for key distribution (V2 - crypto abstraction)
- * This is the v2 implementation using the crypto abstraction layer.
- * The v1 implementation (encrypt.go) remains unchanged for backward compatibility.
+ * Key encryption for key distribution, through the crypto abstraction layer
  */
 
 package kdc
@@ -15,18 +13,16 @@ import (
 	"time"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
-	"github.com/johanix/tdns/v2/crypto"
-	"github.com/johanix/tdns/v2/hpke"
+	"github.com/johanix/tdns-transport/v2/crypto"
 )
 
 // EncryptKeyForNodeV2 encrypts a DNSSEC key's private key material for a specific node
-// using the provided crypto backend (HPKE or JOSE).
-// This is the v2 implementation using crypto abstraction.
+// using the provided crypto backend (JOSE).
 // Returns: encrypted key data, ephemeral public key used (backend-specific), distribution ID, error
 // This function also stores the distribution record in the database
 // kdcConf is optional - if provided, expires_at will be set based on DistributionTTL
 // distributionID is optional - if provided, uses that ID; otherwise generates one for this key
-// backend specifies which crypto backend to use (hpke or jose)
+// backend specifies which crypto backend to use (jose)
 func (kdc *KdcDB) EncryptKeyForNodeV2(
 	key *DNSSECKey,
 	node *Node,
@@ -63,14 +59,7 @@ func (kdc *KdcDB) EncryptKeyForNodeV2(
 		}
 		nodePubKeyData = node.LongTermJosePubKey
 	} else {
-		// Defensive check: refuse HPKE operations for JOSE-only nodes
-		if len(node.SupportedCrypto) == 1 && node.SupportedCrypto[0] == "jose" {
-			return nil, nil, "", fmt.Errorf("node %s only supports JOSE crypto backend, cannot use %s", node.ID, backend.Name())
-		}
-		if len(node.LongTermHpkePubKey) == 0 {
-			return nil, nil, "", fmt.Errorf("node %s does not have a public key stored (required for %s backend)", node.ID, backend.Name())
-		}
-		nodePubKeyData = node.LongTermHpkePubKey
+		return nil, nil, "", fmt.Errorf("unsupported crypto backend: %s", backend.Name())
 	}
 	nodePubKey, err := backend.ParsePublicKey(nodePubKeyData)
 	if err != nil {
@@ -117,7 +106,7 @@ func (kdc *KdcDB) EncryptKeyForNodeV2(
 		EphemeralPubKey: ephemeralPub,
 		CreatedAt:       time.Now(),
 		ExpiresAt:       expiresAt,
-		Status:          hpke.DistributionStatusPending,
+		Status:          DistributionStatusPending,
 		DistributionID:  distID,
 		Operation:       "roll_key",
 		Payload:         make(map[string]interface{}),

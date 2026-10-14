@@ -11,11 +11,11 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"strings"
 	"time"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -64,22 +64,9 @@ func HandleKrsNotify(ctx context.Context, dnr *tdns.DnsNotifyRequest, krsDB *Krs
 
 	// Check if this is a NOTIFY for the control zone or a distribution event
 	// Format: <distributionID>.<controlzone> or just <controlzone>
-	controlZoneFQDN := conf.ControlZone
-	if !strings.HasSuffix(controlZoneFQDN, ".") {
-		controlZoneFQDN += "."
-	}
-
-	if strings.HasSuffix(notifyZone, controlZoneFQDN) {
+	distributionID, err := core.ExtractDistributionIDFromQNAME(notifyZone, conf.ControlZone)
+	if err == nil {
 		// NOTIFY for distribution event: <distributionID>.<controlzone>
-		// Extract distributionID
-		suffixLen := len(controlZoneFQDN)
-		prefix := notifyZone[:len(notifyZone)-suffixLen]
-		prefix = strings.TrimSuffix(prefix, ".")
-
-		// Get the last label (distributionID)
-		labels := strings.Split(prefix, ".")
-		distributionID := labels[len(labels)-1]
-
 		log.Printf("KRS: NOTIFY received for distribution event %s (zone: %s)", distributionID, notifyZone)
 
 		// Process distribution asynchronously
@@ -89,7 +76,7 @@ func HandleKrsNotify(ctx context.Context, dnr *tdns.DnsNotifyRequest, krsDB *Krs
 			}
 		}()
 	} else {
-		log.Printf("KRS: NOTIFY received for zone %s (not control zone %s), ignoring", notifyZone, controlZoneFQDN)
+		log.Printf("KRS: NOTIFY received for zone %s (not a distribution event), ignoring", notifyZone)
 	}
 
 	// Send ACK response
@@ -172,22 +159,9 @@ func _xxxStartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *tnm.KrsCon
 
 		// Check if this is a NOTIFY for the control zone or a distribution event
 		// Format: <distributionID>.<controlzone> or just <controlzone>
-		controlZoneFQDN := conf.ControlZone
-		if !strings.HasSuffix(controlZoneFQDN, ".") {
-			controlZoneFQDN += "."
-		}
-
-		if strings.HasSuffix(notifyZone, controlZoneFQDN) {
+		distributionID, err := core.ExtractDistributionIDFromQNAME(notifyZone, conf.ControlZone)
+		if err == nil {
 			// NOTIFY for distribution event: <distributionID>.<controlzone>
-			// Extract distributionID
-			suffixLen := len(controlZoneFQDN)
-			prefix := notifyZone[:len(notifyZone)-suffixLen]
-			prefix = strings.TrimSuffix(prefix, ".")
-
-			// Get the last label (distributionID)
-			labels := strings.Split(prefix, ".")
-			distributionID := labels[len(labels)-1]
-
 			log.Printf("KRS: NOTIFY received for distribution event %s (zone: %s)", distributionID, notifyZone)
 
 			// Process distribution asynchronously
@@ -197,7 +171,7 @@ func _xxxStartNotifyReceiver(ctx context.Context, krsDB *KrsDB, conf *tnm.KrsCon
 				}
 			}()
 		} else {
-			log.Printf("KRS: NOTIFY received for zone %s (not control zone %s), ignoring", notifyZone, controlZoneFQDN)
+			log.Printf("KRS: NOTIFY received for zone %s (not a distribution event), ignoring", notifyZone)
 		}
 
 		if err := w.WriteMsg(resp); err != nil {

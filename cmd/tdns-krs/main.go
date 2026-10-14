@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * tdns-krs - Key Receiving Service daemon (edge receiver for HPKE key distribution)
+ * tdns-krs - Key Receiving Service daemon (edge receiver for key distribution)
  */
 
 package main
@@ -19,8 +19,6 @@ import (
 	tnm "github.com/johanix/tdns-nm/tnm"
 	"github.com/johanix/tdns-nm/tnm/krs"
 	tdns "github.com/johanix/tdns/v2"
-	"github.com/johanix/tdns/v2/hpke"
-	"gopkg.in/yaml.v3"
 )
 
 func main() {
@@ -40,7 +38,8 @@ func main() {
 
 	// Parse KRS configuration section from config file
 	// This must be done after MainInit (which calls ParseConfig) but before startKrs
-	if err := tnm.ParseKrsConfigFromFile(conf); err != nil {
+	krsConf, err := tnm.ParseKrsConfigFromFile(conf)
+	if err != nil {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error parsing KRS config: %v", err))
 	}
 
@@ -65,7 +64,7 @@ func main() {
 	}()
 
 	// Initialize KRS (replaces conf.StartKrs())
-	err = startKrs(ctx, conf, apirouter)
+	err = startKrs(ctx, conf, krsConf, apirouter)
 	if err != nil {
 		// Print error to stdout/stderr for visibility
 		fmt.Fprintf(os.Stderr, "FATAL: Error starting KRS: %v\n", err)
@@ -78,112 +77,46 @@ func main() {
 
 // startKrs initializes and starts all KRS subsystems
 // This replaces the tdns.StartKrs() function but uses tdns-nm packages
-func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) error {
-	// Parse KRS configuration from stored YAML bytes
-	var krsConf tnm.KrsConf
-
-	// conf.Internal.KrsConf is either []byte (YAML) or already *tnm.KrsConf
-	switch v := conf.Internal.KrsConf.(type) {
-	case []byte:
-		// Unmarshal YAML bytes into tnm.KrsConf
-		if err := yaml.Unmarshal(v, &krsConf); err != nil {
-			return fmt.Errorf("failed to unmarshal KRS config: %v", err)
-		}
-		conf.Internal.KrsConf = &krsConf
-	case *tnm.KrsConf:
-		krsConf = *v
-	default:
-		return fmt.Errorf("KRS configuration not found or invalid type (got %T)", conf.Internal.KrsConf)
-	}
-
+func startKrs(ctx context.Context, conf *tdns.Config, krsConf *tnm.KrsConf, apirouter *mux.Router) error {
 	// Initialize KRS database
 	krsDB, err := krs.NewKrsDB(krsConf.Database.DSN)
 	if err != nil {
 		// Return detailed error message (already includes helpful instructions)
 		return fmt.Errorf("failed to initialize KRS database: %v", err)
 	}
-	conf.Internal.KrsDB = krsDB
 
-	// Determine which crypto backends are supported
-	// If SupportedCrypto is empty, infer from configured key paths
-	// Otherwise, honor the explicit SupportedCrypto list
-	hasHpke := false
-	hasJose := false
-	if len(krsConf.SupportedCrypto) == 0 {
-		// Infer from key paths when SupportedCrypto is not specified
-		if krsConf.Node.LongTermHpkePrivKey != "" {
-			hasHpke = true
-		}
-		if krsConf.Node.LongTermJosePrivKey != "" {
-			hasJose = true
-		}
-	} else {
-		// Honor explicit SupportedCrypto list
-		for _, backend := range krsConf.SupportedCrypto {
-			if backend == "hpke" {
-				hasHpke = true
-			}
-			if backend == "jose" {
-				hasJose = true
-			}
+	// JOSE is the only crypto backend; check that it is the one configured
+	for _, backend := range krsConf.SupportedCrypto {
+		if backend != "jose" {
+			return fmt.Errorf("unsupported crypto backend %q in supported_crypto (only 'jose' is supported)", backend)
 		}
 	}
 
-	// Load and validate keys only for configured backends
-	var hpkePubKey []byte
-	var hpkePrivKey []byte
-
-	if hasHpke {
-		// Validate HPKE key is configured
-		if krsConf.Node.LongTermHpkePrivKey == "" {
-			return fmt.Errorf("HPKE private key not configured (long_term_hpke_priv_key is empty) but HPKE is in supported_crypto list. Either add the key path to the config or remove 'hpke' from supported_crypto")
-		}
-
-		// Load HPKE private key using shared helper
-		privKey, err := tnm.LoadPrivateKey(krsConf.Node.LongTermHpkePrivKey)
-		if err != nil {
-			return fmt.Errorf("failed to load HPKE long-term private key from %s: %v", krsConf.Node.LongTermHpkePrivKey, err)
-		}
-
-		// Derive public key from private key
-		pubKey, err := hpke.DerivePublicKey(privKey)
-		if err != nil {
-			return fmt.Errorf("failed to derive HPKE public key from private key in %s: %v", krsConf.Node.LongTermHpkePrivKey, err)
-		}
-
-		hpkePubKey = pubKey
-		hpkePrivKey = privKey
-		log.Printf("KRS: Loaded HPKE keypair from %s", krsConf.Node.LongTermHpkePrivKey)
+	// Validate JOSE key is configured
+	if krsConf.Node.LongTermJosePrivKey == "" {
+		return fmt.Errorf("JOSE private key not configured (long_term_jose_priv_key is empty)")
 	}
 
-	if hasJose {
-		// Validate JOSE key is configured
-		if krsConf.Node.LongTermJosePrivKey == "" {
-			return fmt.Errorf("JOSE private key not configured (long_term_jose_priv_key is empty) but JOSE is in supported_crypto list. Either add the key path to the config or remove 'jose' from supported_crypto")
-		}
-
-		// Validate JOSE key file exists and is readable
-		if _, err := os.Stat(krsConf.Node.LongTermJosePrivKey); err != nil {
-			return fmt.Errorf("failed to access JOSE long-term private key file %s: %v", krsConf.Node.LongTermJosePrivKey, err)
-		}
-
-		log.Printf("KRS: JOSE keypair configured at %s (will be loaded on demand)", krsConf.Node.LongTermJosePrivKey)
+	// Validate JOSE key file exists and is readable
+	if _, err := os.Stat(krsConf.Node.LongTermJosePrivKey); err != nil {
+		return fmt.Errorf("failed to access JOSE long-term private key file %s: %v", krsConf.Node.LongTermJosePrivKey, err)
 	}
 
-	// Validate at least one backend is configured
-	if !hasHpke && !hasJose {
-		return fmt.Errorf("no crypto backends configured. Either set supported_crypto in config, or configure at least one of long_term_hpke_priv_key or long_term_jose_priv_key")
-	}
+	log.Printf("KRS: JOSE keypair configured at %s (will be loaded on demand)", krsConf.Node.LongTermJosePrivKey)
 
-	// Store node config in database (HPKE keys are optional for JOSE-only nodes)
+	// The KDC's JOSE public key verifies every distribution
+	if err := krs.CheckKdcVerificationKey(krsConf); err != nil {
+		return fmt.Errorf("KDC verification key: %v", err)
+	}
+	log.Printf("KRS: KDC JOSE verification key loaded from %s", krsConf.Node.KdcJosePubKey)
+
+	// Store node config in database
 	nodeConfig := &krs.NodeConfig{
-		ID:                  krsConf.Node.ID,
-		LongTermHpkePubKey:  hpkePubKey,  // nil for JOSE-only nodes
-		LongTermHpkePrivKey: hpkePrivKey, // nil for JOSE-only nodes
-		KdcAddress:          krsConf.Node.KdcAddress,
-		ControlZone:         krsConf.ControlZone,
-		RegisteredAt:        time.Now(),
-		LastSeen:            time.Now(),
+		ID:           krsConf.Node.ID,
+		KdcAddress:   krsConf.Node.KdcAddress,
+		ControlZone:  krsConf.ControlZone,
+		RegisteredAt: time.Now(),
+		LastSeen:     time.Now(),
 	}
 	if err := krsDB.SetNodeConfig(nodeConfig); err != nil {
 		return fmt.Errorf("failed to store node config: %v", err)
@@ -199,7 +132,7 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	}
 	// Call SetupKrsAPIRoutes directly on the router (not via RegisterAPIRoute)
 	// because SetupAPIRouter has already been called and returned
-	krs.SetupKrsAPIRoutes(apirouter, krsDB, &krsConf, confMap, tdns.APIping(conf))
+	krs.SetupKrsAPIRoutes(apirouter, krsDB, krsConf, confMap, tdns.APIping(conf))
 	log.Printf("KRS: API routes setup")
 
 	// Start API dispatcher
@@ -233,7 +166,7 @@ func startKrs(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) err
 	// Register KRS NOTIFY handler (handles all NOTIFYs for control zone and distributions)
 	// KRS handles NOTIFYs for any qtype, so we register with qtype=0 (all NOTIFYs)
 	krsNotifyHandler := func(ctx context.Context, dnr *tdns.DnsNotifyRequest) error {
-		return krs.HandleKrsNotify(ctx, dnr, krsDB, &krsConf)
+		return krs.HandleKrsNotify(ctx, dnr, krsDB, krsConf)
 	}
 	if err := tdns.RegisterNotifyHandler(0, krsNotifyHandler); err != nil {
 		return fmt.Errorf("failed to register KRS NOTIFY handler: %v", err)

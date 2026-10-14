@@ -12,6 +12,5 @@
  *   - kdc_component_cmds.go: Component commands
  *   - kdc_config_cmds.go: Config commands
  *   - kdc_debug_cmds.go: Debug commands
- *   - kdc_hpke_cmds.go: HPKE commands
  */
 package cli

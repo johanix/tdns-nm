@@ -8,8 +8,7 @@
 package krs
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -18,12 +17,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-jose/go-jose/v4"
+	nmdistrib "github.com/johanix/tdns-nm/tnm/distrib"
+	"github.com/johanix/tdns-transport/v2/crypto"
+	"github.com/johanix/tdns-transport/v2/distrib"
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/crypto"
 	"github.com/johanix/tdns/v2/edns0"
-	"github.com/johanix/tdns/v2/hpke"
 	"github.com/miekg/dns"
 
 	tnm "github.com/johanix/tdns-nm/tnm"
@@ -146,15 +145,22 @@ func QueryCHUNK(krsDB *KrsDB, conf *tnm.KrsConf, nodeID, distributionID string, 
 }
 
 // ExtractManifestFromCHUNK extracts manifest data from a CHUNK manifest chunk
-// This is a wrapper around tnm.ExtractManifestData for backward compatibility
-func ExtractManifestFromCHUNK(chunk *core.CHUNK) (*tnm.ManifestData, error) {
-	return tnm.ExtractManifestData(chunk)
+// This is a wrapper around distrib.ExtractManifestData for JSON format
+// For JWT format, use ExtractJWTManifestFromCHUNK instead
+func ExtractManifestFromCHUNK(chunk *core.CHUNK) (*distrib.ManifestData, error) {
+	return distrib.ExtractManifestData(chunk)
+}
+
+// ExtractJWTManifestFromCHUNK extracts JWT manifest data from a CHUNK manifest chunk
+// This verifies the JWT signature using the provided verification key
+func ExtractJWTManifestFromCHUNK(chunk *core.CHUNK, verificationKey crypto.PublicKey, backend crypto.Backend) (*nmdistrib.JWTManifestData, error) {
+	return nmdistrib.ExtractJWTManifestData(chunk, verificationKey, backend)
 }
 
 // ReassembleCHUNKChunks reassembles CHUNK chunks into complete data
-// This is a wrapper around tnm.ReassembleCHUNKChunks for backward compatibility
+// This is a wrapper around distrib.ReassembleCHUNKs for backward compatibility
 func ReassembleCHUNKChunks(chunks []*core.CHUNK) ([]byte, error) {
-	return tnm.ReassembleCHUNKChunks(chunks)
+	return distrib.ReassembleCHUNKs(chunks)
 }
 
 // ProcessDistribution processes a distribution using CHUNK format
@@ -175,167 +181,87 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 		return fmt.Errorf("failed to query CHUNK manifest: %v", err)
 	}
 
-	// Extract manifest information from CHUNK
-	manifestData, err := ExtractManifestFromCHUNK(manifestChunk)
-	if err != nil {
-		return fmt.Errorf("failed to extract manifest from CHUNK: %v", err)
-	}
-
-	// Verify CHUNK manifest HMAC using this node's long-term public key(s)
-	// Try both HPKE and JOSE keys when available, since the manifest HMAC could have been
-	// created using either key depending on which backend was used for encryption
-	var hmacKeys [][]byte
-	var hmacKeyNames []string
-
-	// Try HPKE key if available
-	if conf.Node.LongTermHpkePrivKey != "" {
-		// Load node's HPKE private key
-		privateKey, err := loadPrivateKey(conf.Node.LongTermHpkePrivKey)
-		if err != nil {
-			log.Printf("KRS: Warning: Failed to load node HPKE private key: %v", err)
-		} else {
-			// Derive public key from private key
-			publicKey, err := hpke.DerivePublicKey(privateKey)
-			if err != nil {
-				log.Printf("KRS: Warning: Failed to derive public key from HPKE private key: %v", err)
-			} else {
-				// For HPKE, use the public key directly as HMAC key (32 bytes)
-				hmacKeys = append(hmacKeys, publicKey)
-				hmacKeyNames = append(hmacKeyNames, "HPKE")
-			}
-		}
-	}
-
-	// Try JOSE key if available
-	if conf.Node.LongTermJosePrivKey != "" {
-		// Load JOSE private key using loadPrivateKeyForBackend
-		joseKeyJSON, err := loadPrivateKeyForBackend(conf, "jose")
-		if err != nil {
-			log.Printf("KRS: Warning: Failed to load node JOSE private key: %v", err)
-		} else {
-			// Parse JWK to extract ECDSA private key
-			var jwk jose.JSONWebKey
-			if err := json.Unmarshal(joseKeyJSON, &jwk); err != nil {
-				log.Printf("KRS: Warning: Failed to parse JOSE private key JSON: %v", err)
-			} else {
-				// Extract ECDSA private key
-				ecdsaKey, ok := jwk.Key.(*ecdsa.PrivateKey)
-				if !ok {
-					log.Printf("KRS: Warning: JOSE private key is not an ECDSA key (required for HMAC)")
-				} else {
-					// Validate curve is P-256 (required for 32-byte x-coordinate)
-					if ecdsaKey.Curve != elliptic.P256() {
-						log.Printf("KRS: Warning: JOSE private key uses unsupported curve: %s (expected P-256 for HMAC)", ecdsaKey.Curve.Params().Name)
-					} else {
-						// Extract x-coordinate from the ECDSA private key's public key (32 bytes for P-256)
-						xBytes := ecdsaKey.PublicKey.X.Bytes()
-
-						// Validate x-coordinate length (defensive check - should be <= 32 for P-256)
-						if len(xBytes) > 32 {
-							log.Printf("KRS: Warning: JOSE private key x-coordinate length %d exceeds 32 bytes (curve: %s)", len(xBytes), ecdsaKey.Curve.Params().Name)
-						} else {
-							// Left-pad to 32 bytes if needed (ECDSA coordinates are variable length)
-							hmacKey := make([]byte, 32)
-							copy(hmacKey[32-len(xBytes):], xBytes)
-							hmacKeys = append(hmacKeys, hmacKey)
-							hmacKeyNames = append(hmacKeyNames, "JOSE")
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Verify HMAC with all available keys
-	if len(hmacKeys) == 0 {
-		log.Printf("KRS: Warning: Node long-term private key not configured, skipping HMAC verification")
-	} else {
-		verified := false
-		var lastErr error
-		for i, hmacKey := range hmacKeys {
-			valid, err := tnm.VerifyCHUNKHMAC(manifestChunk, hmacKey)
-			if err != nil {
-				log.Printf("KRS: Warning: Failed to verify CHUNK manifest HMAC with %s key: %v", hmacKeyNames[i], err)
-				lastErr = err
-				continue
-			}
-			if valid {
-				log.Printf("KRS: CHUNK manifest HMAC verified successfully using node's %s public key", hmacKeyNames[i])
-				verified = true
-				break
-			}
-			// HMAC didn't match, try next key
-			log.Printf("KRS: CHUNK manifest HMAC verification failed with %s key, trying next key", hmacKeyNames[i])
-		}
-
-		if !verified {
-			if lastErr != nil {
-				return fmt.Errorf("CHUNK manifest HMAC verification failed with all available keys (%s) - last error: %v", strings.Join(hmacKeyNames, ", "), lastErr)
-			}
-			return fmt.Errorf("CHUNK manifest HMAC verification failed with all available keys (%s) - possible tampering or key mismatch", strings.Join(hmacKeyNames, ", "))
-		}
-	}
-
-	// Extract content type, retire_time, timestamp, distribution_ttl, and crypto from metadata
-	contentType := "unknown"
-	cryptoBackend := "" // Backend used for encryption (hpke or jose)
-	retireTime := ""
+	// Auto-detect manifest format and extract accordingly
+	var manifestData *distrib.ManifestData
+	var contentType string
+	var cryptoBackend string
+	var retireTime string
 	var distributionTimestamp int64
 	var distributionTTL time.Duration
-	if manifestData.Metadata != nil {
-		if c, ok := manifestData.Metadata["content"].(string); ok {
-			contentType = c
-		}
-		// Extract crypto backend (optional, defaults to HPKE for backward compatibility)
-		allowedBackends := []string{"hpke", "jose"}
-		if crypto, ok := manifestData.Metadata["crypto"].(string); ok {
-			// Validate against allowed backends
-			validBackend := false
-			for _, allowed := range allowedBackends {
-				if crypto == allowed {
-					validBackend = true
-					break
-				}
-			}
-			if !validBackend {
-				return fmt.Errorf("invalid crypto backend '%s' in manifest metadata; expected one of: %v", crypto, allowedBackends)
-			}
-			cryptoBackend = crypto
-			log.Printf("KRS: Extracted crypto backend from metadata: %s", cryptoBackend)
-		} else {
-			// Default to HPKE for backward compatibility
-			cryptoBackend = "hpke"
-			log.Printf("KRS: No crypto backend in metadata, defaulting to HPKE")
-		}
-		if rt, ok := manifestData.Metadata["retire_time"].(string); ok {
-			retireTime = rt
-			log.Printf("KRS: Extracted retire_time from metadata: %s", retireTime)
-		}
-		// Extract timestamp for replay protection
-		if ts, ok := manifestData.Metadata["timestamp"].(float64); ok {
-			distributionTimestamp = int64(ts)
-			log.Printf("KRS: Extracted timestamp from metadata: %d", distributionTimestamp)
-		} else {
-			// Timestamp is required for replay protection
-			return fmt.Errorf("missing timestamp in distribution metadata (replay protection)")
-		}
-		// Extract distribution_ttl (default to 5 minutes if not present)
-		if ttlStr, ok := manifestData.Metadata["distribution_ttl"].(string); ok {
-			parsedTTL, err := time.ParseDuration(ttlStr)
+	var chunkHash string
+
+	if distrib.IsJWTManifest(manifestChunk) {
+		// JWT format - extract with signature verification
+		log.Printf("KRS: Detected JWT manifest format")
+
+		// Determine crypto backend from JWT to load correct verification key
+		// For JWT, we need to peek at the claims to determine the backend
+		// Default to JOSE since JWT format typically indicates JOSE was used
+		cryptoBackend = "jose"
+
+		// Load KDC verification key
+		var kdcVerificationKey crypto.PublicKey
+		var backend crypto.Backend
+
+		if cryptoBackend == "jose" && conf.Node.KdcJosePubKey != "" {
+			verificationKeyData, err := loadKdcVerificationKey(conf, cryptoBackend)
 			if err != nil {
-				log.Printf("KRS: Warning: Failed to parse distribution_ttl '%s', using default 5 minutes: %v", ttlStr, err)
+				return fmt.Errorf("failed to load KDC verification key for JWT manifest: %v", err)
+			}
+			backend, err = crypto.GetBackend(cryptoBackend)
+			if err != nil {
+				return fmt.Errorf("failed to get crypto backend for JWT verification: %v", err)
+			}
+			kdcVerificationKey, err = backend.ParsePublicKey(verificationKeyData)
+			if err != nil {
+				return fmt.Errorf("failed to parse KDC verification key: %v", err)
+			}
+		} else {
+			return fmt.Errorf("KDC verification key not configured for JWT manifest verification")
+		}
+
+		// Extract and verify JWT manifest
+		jwtManifest, err := ExtractJWTManifestFromCHUNK(manifestChunk, kdcVerificationKey, backend)
+		if err != nil {
+			return fmt.Errorf("failed to extract and verify JWT manifest: %v", err)
+		}
+		log.Printf("KRS: JWT manifest signature verified successfully")
+
+		// Extract fields from JWT claims (flattened structure)
+		contentType = jwtManifest.Claims.Content
+		cryptoBackend = jwtManifest.Claims.Crypto
+		if cryptoBackend == "" {
+			cryptoBackend = "jose" // Default for JWT format
+		}
+		retireTime = jwtManifest.Claims.RetireTime
+		chunkHash = jwtManifest.Claims.ChunkHash
+		distributionTimestamp = jwtManifest.Claims.IssuedAt
+
+		// Parse distribution TTL
+		if jwtManifest.Claims.DistributionTTL != "" {
+			parsedTTL, err := time.ParseDuration(jwtManifest.Claims.DistributionTTL)
+			if err != nil {
+				log.Printf("KRS: Warning: Failed to parse distribution_ttl '%s', using default 5 minutes: %v", jwtManifest.Claims.DistributionTTL, err)
 				distributionTTL = 5 * time.Minute
 			} else {
 				distributionTTL = parsedTTL
-				log.Printf("KRS: Extracted distribution_ttl from metadata: %s", distributionTTL)
 			}
 		} else {
-			// Default to 5 minutes if not specified (same as TSIG)
 			distributionTTL = 5 * time.Minute
-			log.Printf("KRS: No distribution_ttl in metadata, using default: %s", distributionTTL)
 		}
+
+		// Convert JWT manifest to legacy ManifestData format for processing
+		manifestData = nmdistrib.ConvertJWTClaimsToManifestData(&jwtManifest.Claims, jwtManifest.Payload)
+
+		log.Printf("KRS: Extracted JWT manifest: content=%s, crypto=%s, chunk_count=%d",
+			contentType, cryptoBackend, manifestData.ChunkCount)
+
+	} else if distrib.IsJSONManifest(manifestChunk) {
+		// A JSON manifest is not signed by the KDC; only JWT manifests are accepted
+		return fmt.Errorf("distribution %s has an unsigned (JSON) manifest: refused, only KDC-signed JWT manifests are accepted", distributionID)
 	} else {
-		return fmt.Errorf("missing metadata in distribution manifest (replay protection)")
+		return fmt.Errorf("unsupported manifest format: %d (expected JWT=%d)",
+			manifestChunk.Format, core.FormatJWT)
 	}
 
 	// Validate timestamp freshness (replay protection)
@@ -383,6 +309,15 @@ func ProcessDistribution(krsDB *KrsDB, conf *tnm.KrsConf, distributionID string,
 		log.Printf("KRS: Reassembled %d bytes from %d CHUNK chunks", len(reassembled), len(chunks))
 	} else {
 		return fmt.Errorf("CHUNK manifest has no payload and chunk_count is 0")
+	}
+
+	// The payload must be the one the signed manifest names: an inline payload
+	// is inside the signature already, data chunks are bound to it by chunk_hash
+	if chunkHash == "" {
+		return fmt.Errorf("distribution %s: signed manifest carries no chunk_hash", distributionID)
+	}
+	if got := fmt.Sprintf("sha256:%x", sha256.Sum256(reassembled)); got != chunkHash {
+		return fmt.Errorf("distribution %s: payload hash %s does not match the signed chunk_hash %s", distributionID, got, chunkHash)
 	}
 
 	// Process based on content type
@@ -476,39 +411,15 @@ func ProcessEncryptedText(krsDB *KrsDB, conf *tnm.KrsConf, data []byte) (string,
 	}
 	fmt.Println()
 
-	// Step 3: Load node's private key and decrypt using shared function
-	log.Printf("KRS: Loading private key from %s...", conf.Node.LongTermHpkePrivKey)
-	if conf.Node.LongTermHpkePrivKey == "" {
-		return "", fmt.Errorf("node long-term HPKE private key not configured")
-	}
-
-	privateKey, err := tnm.LoadPrivateKey(conf.Node.LongTermHpkePrivKey)
+	// Step 3: Verify the KDC signature and decrypt with the node's JOSE key
+	plaintext, err := decryptPayload(conf, data, "jose")
 	if err != nil {
-		return "", fmt.Errorf("failed to load private key: %v", err)
-	}
-	log.Printf("KRS: Private key loaded: %d bytes", len(privateKey))
-	log.Printf("KRS: Private key (first 8 bytes): %x", privateKey[:8])
-
-	// Verify we can derive public key from private key (sanity check)
-	derivedPubKey, err := hpke.DerivePublicKey(privateKey)
-	if err != nil {
-		log.Printf("KRS: WARNING: Failed to derive public key from private key: %v", err)
-	} else {
-		log.Printf("KRS: Derived public key from private key (first 8 bytes): %x", derivedPubKey[:8])
-		log.Printf("KRS: This public key should match the node's public key stored in KDC")
-	}
-
-	// Decrypt using shared function
-	log.Printf("KRS: Attempting HPKE decryption...")
-	plaintext, err := tnm.DecodeAndDecrypt(privateKey, data)
-	if err != nil {
-		log.Printf("KRS: HPKE decryption failed: %v", err)
 		return "", fmt.Errorf("failed to decrypt encrypted text: %v", err)
 	}
-	log.Printf("KRS: HPKE decryption successful: %d bytes decrypted", len(plaintext))
+	log.Printf("KRS: JOSE decryption successful: %d bytes decrypted", len(plaintext))
 
 	// Step 4: Display decrypted cleartext
-	log.Printf("KRS: --- Cleartext (after HPKE decryption, %d bytes) ---", len(plaintext))
+	log.Printf("KRS: --- Cleartext (after JOSE decryption, %d bytes) ---", len(plaintext))
 	text := string(plaintext)
 	fmt.Println(text)
 	log.Printf("KRS: ===== END ENCRYPTED TEXT =====")
@@ -539,17 +450,12 @@ func ProcessZoneList(krsDB *KrsDB, data []byte) error {
 }
 
 // decryptPayload decrypts an encrypted payload using the appropriate crypto backend
-// Handles backend defaulting, validation, key loading, and V1/V2 path selection
+// Handles backend defaulting, validation, key loading, and signature verification
 // Returns the decrypted plaintext or an error
 func decryptPayload(conf *tnm.KrsConf, data []byte, cryptoBackend string) ([]byte, error) {
-	// Default to HPKE if crypto backend not specified (backward compatibility)
+	// Default to JOSE if crypto backend not specified
 	if cryptoBackend == "" {
-		cryptoBackend = "hpke"
-	}
-
-	// Fail fast if JOSE backend is requested but crypto V2 is disabled
-	if cryptoBackend == "jose" && !conf.ShouldUseCryptoV2() {
-		return nil, fmt.Errorf("jose backend requires crypto V2; enable feature flag or choose a different backend")
+		cryptoBackend = "jose"
 	}
 
 	privateKey, err := loadPrivateKeyForBackend(conf, cryptoBackend)
@@ -558,39 +464,34 @@ func decryptPayload(conf *tnm.KrsConf, data []byte, cryptoBackend string) ([]byt
 	}
 	log.Printf("KRS: Loaded node private key for %s backend (%d bytes)", cryptoBackend, len(privateKey))
 
-	// Decrypt the entire payload using V1 or V2 based on feature flag
-	var plaintextJSON []byte
-	if conf.ShouldUseCryptoV2() {
-		// V2: Use crypto abstraction layer
-		log.Printf("KRS: Using crypto V2 for decryption with backend: %s", cryptoBackend)
-
-		// Get the crypto backend
-		backend, err := crypto.GetBackend(cryptoBackend)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get crypto backend %s: %v", cryptoBackend, err)
-		}
-
-		// Parse the private key using the backend
-		privKey, err := backend.ParsePrivateKey(privateKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse private key with %s backend: %v", backend.Name(), err)
-		}
-
-		// Decrypt using V2
-		plaintextJSON, err = tnm.DecodeAndDecryptV2(privKey, data, backend)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt distribution payload with %s backend: %v", backend.Name(), err)
-		}
-		log.Printf("KRS: Successfully decrypted distribution payload using %s backend: %d bytes", backend.Name(), len(plaintextJSON))
-	} else {
-		// V1: Use direct HPKE implementation
-		log.Printf("KRS: Using crypto V1 (direct HPKE) for decryption")
-		plaintextJSON, err = tnm.DecodeAndDecrypt(privateKey, data)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt distribution payload: %v", err)
-		}
-		log.Printf("KRS: Successfully decrypted distribution payload: %d bytes", len(plaintextJSON))
+	// Get the crypto backend
+	backend, err := crypto.GetBackend(cryptoBackend)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get crypto backend %s: %v", cryptoBackend, err)
 	}
+
+	// Load the KDC verification key: every payload must carry the KDC's signature
+	verificationKeyData, err := loadKdcVerificationKey(conf, cryptoBackend)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load KDC %s verification key: %v", cryptoBackend, err)
+	}
+	kdcVerificationKey, err := backend.ParsePublicKey(verificationKeyData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse KDC %s verification key: %v", cryptoBackend, err)
+	}
+
+	// Parse the private key using the backend
+	privKey, err := backend.ParsePrivateKey(privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse private key with %s backend: %v", backend.Name(), err)
+	}
+
+	// Verify the JWS signature, then decrypt the JWE: JWS(JWE(payload))
+	plaintextJSON, err := nmdistrib.DecodeDecryptAndVerify(backend, privKey, kdcVerificationKey, data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt and verify distribution payload with %s backend: %v", backend.Name(), err)
+	}
+	log.Printf("KRS: Verified signature and decrypted distribution payload using %s backend: %d bytes", backend.Name(), len(plaintextJSON))
 
 	return plaintextJSON, nil
 }
@@ -845,15 +746,7 @@ func ProcessNodeComponents(krsDB *KrsDB, conf *tnm.KrsConf, data []byte, distrib
 	return nil
 }
 
-// loadPrivateKey loads a private key from a file path
-// The file should contain a hex-encoded 32-byte HPKE private key
-// This is a wrapper around tnm.LoadPrivateKey for backward compatibility
-func loadPrivateKey(keyPath string) ([]byte, error) {
-	return tnm.LoadPrivateKey(keyPath)
-}
-
 // loadPrivateKeyForBackend loads the appropriate private key based on the crypto backend
-// For HPKE: loads hex-encoded 32-byte key from LongTermHpkePrivKey
 // For JOSE: loads JWK JSON from LongTermJosePrivKey
 func loadPrivateKeyForBackend(conf *tnm.KrsConf, cryptoBackend string) ([]byte, error) {
 	if cryptoBackend == "jose" {
@@ -889,19 +782,65 @@ func loadPrivateKeyForBackend(conf *tnm.KrsConf, cryptoBackend string) ([]byte, 
 
 		log.Printf("KRS: Loaded JOSE private key from %s (%d bytes JSON)", conf.Node.LongTermJosePrivKey, len(jwkJSON))
 		return []byte(jwkJSON), nil
-	} else {
-		// Load HPKE private key (hex format)
-		if conf.Node.LongTermHpkePrivKey == "" {
-			return nil, fmt.Errorf("node long-term HPKE private key not configured (required for HPKE backend)")
+	}
+	return nil, fmt.Errorf("unsupported crypto backend: %s", cryptoBackend)
+}
+
+// CheckKdcVerificationKey checks that the KDC's JOSE public key is configured,
+// readable and parseable. Every distribution is verified with it, so a KRS
+// without it can receive nothing.
+func CheckKdcVerificationKey(conf *tnm.KrsConf) error {
+	keyData, err := loadKdcVerificationKey(conf, "jose")
+	if err != nil {
+		return err
+	}
+	backend, err := crypto.GetBackend("jose")
+	if err != nil {
+		return fmt.Errorf("failed to get JOSE backend: %v", err)
+	}
+	if _, err := backend.ParsePublicKey(keyData); err != nil {
+		return fmt.Errorf("failed to parse KDC JOSE public key %s: %v", conf.Node.KdcJosePubKey, err)
+	}
+	return nil
+}
+
+// loadKdcVerificationKey loads the KDC's public key for signature verification
+// This is used to verify JWS signatures on distributions
+func loadKdcVerificationKey(conf *tnm.KrsConf, cryptoBackend string) ([]byte, error) {
+	if cryptoBackend == "jose" {
+		// Load KDC JOSE public key (JWK JSON format)
+		if conf.Node.KdcJosePubKey == "" {
+			return nil, fmt.Errorf("KDC JOSE public key not configured (kdc_jose_pubkey)")
 		}
 
-		privateKey, err := tnm.LoadPrivateKey(conf.Node.LongTermHpkePrivKey)
+		// Read KDC JOSE public key file
+		keyData, err := os.ReadFile(conf.Node.KdcJosePubKey)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load HPKE private key: %v", err)
+			return nil, fmt.Errorf("failed to read KDC JOSE public key file %s: %v", conf.Node.KdcJosePubKey, err)
 		}
 
-		log.Printf("KRS: Loaded HPKE private key from %s (%d bytes)", conf.Node.LongTermHpkePrivKey, len(privateKey))
-		return privateKey, nil
+		// Parse key (skip comments, extract JSON)
+		keyLines := strings.Split(string(keyData), "\n")
+		var jsonLines []string
+		for _, line := range keyLines {
+			trimmedLine := strings.TrimSpace(line)
+			if trimmedLine != "" && !strings.HasPrefix(trimmedLine, "#") {
+				// Preserve original line for pretty-printed JSON
+				jsonLines = append(jsonLines, line)
+			}
+		}
+
+		if len(jsonLines) == 0 {
+			return nil, fmt.Errorf("could not find KDC JOSE public key JSON in file %s", conf.Node.KdcJosePubKey)
+		}
+
+		// Join lines with newlines to preserve formatting
+		jwkJSON := strings.Join(jsonLines, "\n")
+
+		log.Printf("KRS: Loaded KDC JOSE verification key from %s (%d bytes JSON)", conf.Node.KdcJosePubKey, len(jwkJSON))
+		return []byte(jwkJSON), nil
+	} else {
+		return nil, fmt.Errorf("unsupported crypto backend for verification key: %s", cryptoBackend)
 	}
 }
 

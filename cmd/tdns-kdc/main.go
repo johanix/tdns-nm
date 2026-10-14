@@ -22,7 +22,6 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"gopkg.in/yaml.v3"
 )
 
 func main() {
@@ -42,7 +41,8 @@ func main() {
 
 	// Parse KDC configuration section from config file
 	// This must be done after MainInit (which calls ParseConfig) but before startKdc
-	if err := tnm.ParseKdcConfigFromFile(conf); err != nil {
+	kdcConf, err := tnm.ParseKdcConfigFromFile(conf)
+	if err != nil {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error parsing KDC config: %v", err))
 	}
 
@@ -68,7 +68,7 @@ func main() {
 
 	// Initialize KDC (replaces conf.StartKdc())
 	// Note: This will also register KDC API routes directly on apirouter
-	err = startKdc(ctx, conf, apirouter)
+	err = startKdc(ctx, conf, kdcConf, apirouter)
 	if err != nil {
 		// Print error to stdout so user sees it immediately
 		fmt.Fprintf(os.Stdout, "\n%s\n\n", err.Error())
@@ -81,80 +81,57 @@ func main() {
 
 // startKdc initializes and starts all KDC subsystems
 // This replaces the tdns.StartKdc() function but uses tdns-nm packages
-func startKdc(ctx context.Context, conf *tdns.Config, apirouter *mux.Router) error {
-	// Parse KDC configuration from stored YAML bytes
-	var kdcConf tnm.KdcConf
+func startKdc(ctx context.Context, conf *tdns.Config, kdcConf *tnm.KdcConf, apirouter *mux.Router) error {
+	// Validate JOSE key configuration BEFORE initializing database
+	// This is critical - KDC cannot function without a valid JOSE keypair
+	if kdcConf.KdcJosePrivKey == "" {
+		return fmt.Errorf(`FATAL: kdc_jose_priv_key is not configured in KDC config file.
 
-	// conf.Internal.KdcConf is either []byte (YAML) or already *tnm.KdcConf
-	switch v := conf.Internal.KdcConf.(type) {
-	case []byte:
-		// Unmarshal YAML bytes into tnm.KdcConf
-		if err := yaml.Unmarshal(v, &kdcConf); err != nil {
-			return fmt.Errorf("failed to unmarshal KDC config: %v", err)
-		}
-		conf.Internal.KdcConf = &kdcConf
-	case *tnm.KdcConf:
-		kdcConf = *v
-	default:
-		return fmt.Errorf("KDC configuration not found or invalid type (got %T)", conf.Internal.KdcConf)
-	}
-
-	// Validate HPKE key configuration BEFORE initializing database
-	// This is critical - KDC cannot function without a valid HPKE keypair
-	if kdcConf.KdcHpkePrivKey == "" {
-		return fmt.Errorf(`FATAL: kdc_hpke_priv_key is not configured in KDC config file.
-
-The KDC requires a long-term HPKE (Hybrid Public Key Encryption) keypair to:
+The KDC requires a long-term JOSE (P-256) keypair to:
   - Encrypt enrollment confirmations sent to KRS nodes
   - Decrypt enrollment requests from KRS nodes
+  - Sign and encrypt key distributions
 
 To fix this:
-  1. Generate an HPKE keypair using: kdc-cli hpke generate --outfile /path/to/kdc.hpke.privatekey
+  1. Generate a JOSE keypair using: kdc-cli keys generate --jose-outfile /path/to/kdc.jose.privatekey
   2. Add the following to your KDC config file (under 'kdc:' section):
-     kdc_hpke_priv_key: /path/to/kdc.hpke.privatekey
+     kdc_jose_priv_key: /path/to/kdc.jose.privatekey
   3. Restart the KDC
 
-The key file will be created with appropriate permissions (0600) and will contain
-both the private key and public key information.`)
+The key file will be created with appropriate permissions (0600).`)
 	}
 
-	// Try to load the HPKE keypair to validate it exists and is readable
-	hpkeKeys, err := kdc.GetKdcHpkeKeypair(kdcConf.KdcHpkePrivKey)
+	// Try to load the JOSE keypair to validate it exists and is readable
+	joseKeys, err := kdc.GetKdcJoseKeypair(kdcConf.KdcJosePrivKey)
 	if err != nil {
-		return fmt.Errorf(`FATAL: Failed to load HPKE keypair from %s: %v
+		return fmt.Errorf(`FATAL: Failed to load JOSE keypair from %s: %v
 
-The KDC cannot start without a valid HPKE keypair. This keypair is required to:
+The KDC cannot start without a valid JOSE keypair. This keypair is required to:
   - Encrypt enrollment confirmations sent to KRS nodes
   - Decrypt enrollment requests from KRS nodes
+  - Sign and encrypt key distributions
 
 To fix this:
-  1. If the key file does not exist, generate a new HPKE keypair:
-     kdc-cli hpke generate --outfile %s
+  1. If the key file does not exist, generate a new JOSE keypair:
+     kdc-cli keys generate --jose-outfile %s
   2. If the key file exists but cannot be read, check file permissions (should be 0600)
-  3. Ensure the path in kdc_hpke_priv_key in your KDC config is correct
+  3. Ensure the path in kdc_jose_priv_key in your KDC config is correct
   4. Restart the KDC
 
 Note: If you generate a NEW keypair, you must regenerate all enrollment blobs that were
-created with the old public key, as they will no longer be decryptable.`, kdcConf.KdcHpkePrivKey, err, kdcConf.KdcHpkePrivKey)
+created with the old public key, as they will no longer be decryptable.`, kdcConf.KdcJosePrivKey, err, kdcConf.KdcJosePrivKey)
 	}
 
-	// Log successful key loading (public key for verification)
-	pubKeyHex := fmt.Sprintf("%x", hpkeKeys.PublicKey)
-	log.Printf("KDC: Loaded HPKE keypair from %s (public key: %s...)", kdcConf.KdcHpkePrivKey, pubKeyHex[:16])
+	// Log successful key loading (key ID for verification)
+	log.Printf("KDC: Loaded JOSE keypair from %s (key id: %s)", kdcConf.KdcJosePrivKey, kdc.GenerateKeyID("jose", joseKeys.PublicKeyBytes))
 
-	// Warn if JOSE key is missing when crypto-v2 is enabled
-	if kdcConf.ShouldUseCryptoV2() && kdcConf.KdcJosePrivKey == "" {
-		log.Printf("KDC: Warning: kdc_jose_priv_key not configured; JOSE enrollment/key distribution will fail")
-	}
-
-	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN, &kdcConf)
+	kdcDB, err := kdc.NewKdcDB(kdcConf.Database.Type, kdcConf.Database.DSN, kdcConf)
 	if err != nil {
 		return fmt.Errorf("failed to initialize KDC database: %v", err)
 	}
-	conf.Internal.KdcDB = kdcDB
 
 	// Initialize catalog zone if configured (auto-generate on startup)
-	if err := kdc.InitializeCatalogZone(ctx, kdcDB, &kdcConf); err != nil {
+	if err := kdc.InitializeCatalogZone(ctx, kdcDB, kdcConf); err != nil {
 		return fmt.Errorf("failed to initialize catalog zone: %v", err)
 	}
 
@@ -166,9 +143,9 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 			"Addresses": conf.ApiServer.Addresses,
 		},
 		"DnsEngine": map[string]interface{}{
-			"Addresses": conf.DnsEngine.Addresses,
+			"Addresses": conf.Listeners.Addresses,
 		},
-		"KdcConf": &kdcConf,
+		"KdcConf": kdcConf,
 	}
 	// Call SetupKdcAPIRoutes directly on the router (not via RegisterAPIRoute)
 	// because SetupAPIRouter has already been called and returned
@@ -206,7 +183,7 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 			Options:        dqr.Options,
 		}
 		// Call KDC handler (will return ErrNotHandled for unsupported qtypes)
-		return kdc.HandleKdcQuery(ctx, kdcReq, kdcDB, &kdcConf)
+		return kdc.HandleKdcQuery(ctx, kdcReq, kdcDB, kdcConf)
 	}
 
 	// Register handlers for each qtype that KDC handles
@@ -239,7 +216,7 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 			log.Printf("KDC: NotifyHandler callback invoked (qname=%s)", dnr.Qname)
 		}
 		// Call KDC NOTIFY handler
-		return kdc.HandleKdcNotify(ctx, dnr.Msg, dnr.Qname, dnr.ResponseWriter, kdcDB, &kdcConf)
+		return kdc.HandleKdcNotify(ctx, dnr.Msg, dnr.Qname, dnr.ResponseWriter, kdcDB, kdcConf)
 	}
 	if err := tdns.RegisterNotifyHandler(core.TypeCHUNK, kdcNotifyHandler); err != nil {
 		return fmt.Errorf("failed to register CHUNK NOTIFY handler: %v", err)
@@ -263,7 +240,7 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 			log.Printf("KDC: EnrollmentUpdateHandler invoked (qname=%s)", dur.Qname)
 		}
 		// Call KDC enrollment handler
-		return kdc.HandleEnrollmentUpdate(ctx, dur, kdcDB, &kdcConf)
+		return kdc.HandleEnrollmentUpdate(ctx, dur, kdcDB, kdcConf)
 	}
 
 	if err := tdns.RegisterUpdateHandler(enrollmentMatcher, enrollmentUpdateHandler); err != nil {
@@ -279,7 +256,7 @@ created with the old public key, as they will no longer be decryptable.`, kdcCon
 	}
 
 	if err := tdns.RegisterEngine("KeyStateWorker", func(ctx context.Context) error {
-		return kdc.KeyStateWorker(ctx, kdcDB, &kdcConf)
+		return kdc.KeyStateWorker(ctx, kdcDB, kdcConf)
 	}); err != nil {
 		return fmt.Errorf("failed to register KeyStateWorker: %v", err)
 	}
