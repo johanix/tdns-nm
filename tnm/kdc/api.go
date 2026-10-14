@@ -612,8 +612,8 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 											log.Printf("KDC: Skipping node %s (no notify_address configured)", node.ID)
 											continue
 										}
-										// Encrypt key for this node (creates distribution record)
-										_, _, _, err := kdcDB.EncryptKeyForNode(key, node, kdcConf)
+										// Encrypt key for this node under the announced distribution ID (creates distribution record)
+										_, _, _, err := kdcDB.EncryptKeyForNode(key, node, kdcConf, distributionID)
 										if err != nil {
 											log.Printf("KDC: Warning: Failed to encrypt key for node %s: %v", node.ID, err)
 											continue
@@ -640,7 +640,7 @@ func APIKdcZone(kdcDB *KdcDB, kdcConf *tnm.KdcConf) http.HandlerFunc {
 												if node.NotifyAddress == "" {
 													continue
 												}
-												_, _, _, err := kdcDB.EncryptKeyForNode(activeKSK, node, kdcConf)
+												_, _, _, err := kdcDB.EncryptKeyForNode(activeKSK, node, kdcConf, kskDistributionID)
 												if err != nil {
 													log.Printf("KDC: Warning: Failed to encrypt KSK for node %s: %v", node.ID, err)
 													continue
